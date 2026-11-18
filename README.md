@@ -85,4 +85,4 @@ skyrf/
 
 ## Roadmap
 
-Ver `PROYECTO.md` — preguntas de investigación (RQ1–RQ3), plan de dataset propio, fases y saga de videos.
+Ver `PROYECTO.md` — preguntas de investigación (RQ1–RQ3), plan de dataset propio y fases.
