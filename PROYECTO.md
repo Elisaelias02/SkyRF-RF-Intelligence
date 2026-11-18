@@ -67,13 +67,13 @@ Formato: PCAP-NG (Kismet/catnip) + CSV de labels. Publicable al final del proyec
 └─────────────────────────────────────────────────────────┘
 ```
 
-Núcleo: Python + scikit-learn + Scapy + rich (terminal cyan). La web llega después encima del mismo núcleo — no se reescribe nada.
+Núcleo: Python + scikit-learn + Scapy + rich. La web llega después encima del mismo núcleo — no se reescribe nada.
 
 ---
 
 ## 5. Roadmap (alineado a la saga de videos)
 
-| Fase | Entregable | Estado | Video |
+| Fase | Entregable | 
 |---|---|---|---|
 | **1** | Clasificador de protocolo/dispositivo + pipeline de captura real | 
 | **2** | transport-key-watcher automático (dentro del bridge) | 
