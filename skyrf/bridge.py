@@ -4,9 +4,13 @@ El dashboard web se conecta a ws://localhost:8765 y recibe paquetes y
 alertas en tiempo real. El bridge:
 
 1. Sigue la captura que catnip/Wireshark escribe a disco (--raw / pcapng).
-2. Parsea cada frame 802.15.4 (MAC/NWK) y lo reenvía como evento JSON.
-3. Corre el transport-key-watcher en línea: si cae una network key,
-   emite alerta crítica + evento `key_captured`.
+2. Parsea cada frame y lo reenvía como evento JSON al dashboard.
+3. Corre los watchers de seguridad en línea según el protocolo:
+   - zigbee  → transport-key-watcher (network keys) + thread-watcher
+               (MLE / ventana de comisionado Thread; mismo PHY 802.15.4)
+   - lora/fsk → lorawan-auditor (FCnt reset, DevNonce reutilizado, floods)
+   - ble     → visibilidad de advertising; el crackeo de pairing es offline
+               (skyrf.playbooks.ble_legacy sobre el pcap de Sniffle)
 
 Uso:
     # catnip con volcado hex en paralelo (terminal 1):
@@ -31,6 +35,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import struct
 import sys
 import time
@@ -40,6 +45,8 @@ import websockets
 from skyrf import __version__
 from skyrf.playbooks.frames import parse_mac
 from skyrf.playbooks.transport_key_watcher import TransportKeyWatcher
+from skyrf.playbooks.thread_watcher import ThreadWatcher
+from skyrf.playbooks.lorawan_auditor import LoRaWANAuditor
 
 HOST, PORT = "127.0.0.1", 8765
 
@@ -96,18 +103,24 @@ _BLE_PDU_FRAME_TYPE = {
 def parse_ble_adv(frame: bytes) -> dict | None:
     """Parsea un PDU de advertising BLE (canales 37-39).
 
-    Tolera volcados con o sin el access address (0x8E89BED6) al inicio.
+    Tolera tres formatos de volcado:
+    - PDU pelón (header + payload)
+    - con access address (0x8E89BED6) al inicio
+    - pcap DLT_BLUETOOTH_LE_LL_WITH_PHDR (pseudo-header de 10B antes del AA)
+
     Devuelve {len, src, frameType} o None si no es un ADV PDU reconocible.
     """
     b = bytes(frame)
     i = b.find(BLE_ADV_AA)
-    if 0 <= i <= 1:
-        b = b[i + 4:]                      # volcado con AA: el PDU empieza después
+    if i > 12:
+        i = -1                             # más allá del offset 12 = payload, no header
+    if i >= 0:
+        b = b[i + 4:]
     if len(b) < 8:
         return None
     pdu_len = b[1] & 0x3F                  # header byte 1: length (6 bits)
     payload = b[2:2 + pdu_len]
-    if len(payload) < 6:
+    if len(payload) < 6 or pdu_len > 37:   # ADV payload máx BLE 4.x = 37 B
         return None
     adva = payload[:6]                     # AdvA: BD_ADDR little-endian al aire
     src = ":".join(f"{x:02X}" for x in reversed(adva))
@@ -118,13 +131,29 @@ def parse_ble_adv(frame: bytes) -> dict | None:
     }
 
 
-def _emit_packet(frame: bytes, channel: int, rssi: int | None, watcher,
+def parse_lora_frame(payload: bytes) -> dict | None:
+    """Best-effort LoRaWAN: MHDR(1B) + DevAddr(4B, little-endian al aire).
+
+    Identifica al nodo por su DevAddr; frames no-LoRaWAN dan una etiqueta
+    de todos modos (la metadata es lo que alimenta al clasificador).
+    """
+    if len(payload) < 5:
+        return None
+    return {"src": "0x" + payload[1:5][::-1].hex().upper(), "len": len(payload)}
+
+
+def _emit_packet(frame: bytes, channel: int, rssi: int | None, consumers,
                  proto: str = "zigbee") -> None:
     if proto == "ble":
         adv = parse_ble_adv(frame)
         if adv is None:
             return                         # no-ADV (data channels) o basura: fuera
         src, dst, frame_type, plen = adv["src"], "", adv["frameType"], adv["len"]
+    elif proto in ("lora", "fsk"):
+        node = parse_lora_frame(frame)
+        if node is None:
+            return
+        src, dst, frame_type, plen = node["src"], "", "data", node["len"]
     else:
         try:
             mac = parse_mac(frame)
@@ -138,11 +167,20 @@ def _emit_packet(frame: bytes, channel: int, rssi: int | None, watcher,
         "channel": channel, "rssi": rssi, "src": src, "dst": dst,
         "frameType": frame_type,
     })
-    if watcher is not None:                # el watcher es Zigbee-only
-        watcher.feed(frame)
+    for consume in consumers:              # watchers de seguridad del protocolo
+        try:
+            consume(frame, rssi)
+        except Exception:
+            pass                           # un frame raro no puede tumbar el bridge
 
 
-def follow_hex_file(path: str, channel: int, watcher,
+# catnip v3.3+ escribe lora/fsk raw como:  RX: <hex> | RSSI: <rssi> | SNR: <snr>
+_RX_LINE = re.compile(
+    r"^RX:\s*([0-9a-fA-F]+)\s*(?:\|\s*RSSI:\s*(-?\d+))?"
+)
+
+
+def follow_hex_file(path: str, channel: int, consumers,
                     proto: str = "zigbee") -> None:
     """Sigue un archivo hex creciente (tail -f). Un frame por línea."""
     pos = 0
@@ -162,16 +200,22 @@ def follow_hex_file(path: str, channel: int, watcher,
                 line = line.strip()
                 if not line:
                     continue
+                m = _RX_LINE.match(line)   # formato lora/fsk de catnip v3.3+
                 try:
-                    _emit_packet(bytes.fromhex(line), channel, None, watcher,
-                                 proto=proto)
+                    if m:
+                        rssi = int(m.group(2)) if m.group(2) else None
+                        _emit_packet(bytes.fromhex(m.group(1)), channel, rssi,
+                                     consumers, proto=proto)
+                    else:
+                        _emit_packet(bytes.fromhex(line), channel, None,
+                                     consumers, proto=proto)
                 except ValueError:
                     pass  # línea incompleta o no-hex: se ignora
         else:
             time.sleep(0.1)
 
 
-def follow_pcap_file(path: str, channel: int, watcher,
+def follow_pcap_file(path: str, channel: int, consumers,
                      proto: str = "zigbee") -> None:
     """Sigue un pcap/pcapng creciente (captura de Wireshark/catnip).
 
@@ -192,7 +236,7 @@ def follow_pcap_file(path: str, channel: int, watcher,
 
         for pkt in packets[emitted:]:
             emitted += 1
-            _emit_packet(bytes(pkt), channel, None, watcher, proto=proto)
+            _emit_packet(bytes(pkt), channel, None, consumers, proto=proto)
         time.sleep(0.3)
 
 
@@ -205,17 +249,20 @@ def main() -> int:
                      help="sigue un volcado hex de catnip (--raw)")
     src.add_argument("--pcap-follow", metavar="ARCHIVO",
                      help="sigue un pcap/pcapng de Wireshark/catnip")
-    ap.add_argument("--proto", choices=["zigbee", "ble"], default="zigbee",
+    ap.add_argument("--proto", choices=["zigbee", "ble", "lora", "fsk"],
+                    default="zigbee",
                     help="protocolo del volcado (zigbee cubre 802.15.4: "
-                         "Zigbee y Thread; ble = advertising 37-39)")
+                         "Zigbee y Thread; ble = advertising 37-39, vía pcap "
+                         "de Sniffle; lora/fsk = raw hex de catnip)")
     ap.add_argument("--channel", type=int, default=None,
                     help="canal de captura (Zigbee/Thread 11-26; BLE: 37 por "
-                         "defecto, etiqueta de los canales de advertising)")
+                         "defecto, etiqueta de los canales de advertising; "
+                         "lora/fsk: 0 = sub-GHz, sin columna en el waterfall)")
     ap.add_argument("--host", default=HOST)
     ap.add_argument("--port", type=int, default=PORT)
     args = ap.parse_args()
     if args.channel is None:
-        args.channel = 37 if args.proto == "ble" else 15
+        args.channel = {"zigbee": 15, "ble": 37}.get(args.proto, 0)
 
     def on_key(net) -> None:
         broadcast({
@@ -230,16 +277,34 @@ def main() -> int:
         })
         print(f"\n  ⚡ NETWORK KEY: {net.network_key.hex()}  ({net.summary()})\n")
 
-    watcher = TransportKeyWatcher(on_key_captured=on_key) \
-        if args.proto == "zigbee" else None
-    watcher_line = ("transport-key-watcher: ACTIVO (TC link key por defecto)"
-                    if watcher else
-                    "transport-key-watcher: N/A (BLE no usa Transport Key)")
+    def on_watch_alert(a: dict) -> None:
+        broadcast({"type": "alert", "level": a["level"],
+                   "title": a["title"], "detail": a["detail"]})
+        icon = {"critical": "⚡", "warn": "⚠", "info": "·"}.get(a["level"], "·")
+        print(f"  {icon} [{a['proto']}] {a['title']}: {a['detail']}")
+
+    # watchers por protocolo — cada uno expone feed(frame, rssi=None, ...)
+    consumers = []
+    watcher_lines = []
+    if args.proto == "zigbee":
+        tkw = TransportKeyWatcher(on_key_captured=on_key)
+        consumers.append(lambda f, rssi=None: tkw.feed(f))
+        watcher_lines.append("transport-key-watcher: ACTIVO (TC link key por defecto)")
+        tw = ThreadWatcher(on_alert=on_watch_alert)
+        consumers.append(lambda f, rssi=None: tw.feed(f, rssi=rssi))
+        watcher_lines.append("thread-watcher: ACTIVO (MLE/19788 · comisionado/5684)")
+    elif args.proto in ("lora", "fsk"):
+        lw = LoRaWANAuditor(on_alert=on_watch_alert)
+        consumers.append(lambda f, rssi=None: lw.feed(f, rssi=rssi))
+        watcher_lines.append("lorawan-auditor: ACTIVO (FCnt reset · DevNonce · floods)")
+    else:
+        watcher_lines.append("watchers: N/A en BLE — pairing se crackea offline "
+                             "(skyrf.playbooks.ble_legacy <pcap>)")
 
     print(f"""
   SkyRF bridge v{__version__} — ws://{args.host}:{args.port}
   Fuente: {args.raw_follow or args.pcap_follow}  ({args.proto}, canal {args.channel})
-  {watcher_line}
+  {chr(10).join(watcher_lines)}
   Abre el dashboard y pulsa CAPTURAR. Ctrl+C para salir.
 """)
 
@@ -253,7 +318,7 @@ def main() -> int:
     target = (follow_hex_file if args.raw_follow else follow_pcap_file)
     path = args.raw_follow or args.pcap_follow
     t = threading.Thread(target=target,
-                         args=(path, args.channel, watcher, args.proto),
+                         args=(path, args.channel, consumers, args.proto),
                          daemon=True)
     t.start()
 
