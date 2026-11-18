@@ -45,7 +45,7 @@ export function DeviceDrawer({ device, onClose }: Props) {
         <div className="panel-header h-12">
           <div className="min-w-0">
             <div className="text-[13px] font-semibold truncate">Nodo {device.id}</div>
-            <div className="text-[10px] text-muted-foreground">canal {device.channel} · 802.15.4</div>
+            <div className="text-[10px] text-muted-foreground">canal {device.channel} · RF</div>
           </div>
           <button
             onClick={onClose}

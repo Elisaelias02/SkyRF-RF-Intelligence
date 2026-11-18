@@ -71,7 +71,7 @@ export function DeviceTable({ devices, elapsed, filter, onSelect }: Props) {
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#34d399]" />
                   </td>
                   <td className="px-3 py-2 font-medium tabular-nums whitespace-nowrap">{d.id}</td>
-                  <td className="px-3 py-2 whitespace-nowrap text-muted-foreground">Nodo 802.15.4</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-muted-foreground">Nodo RF</td>
                   <td className="px-3 py-2">
                     {proto ? (
                       <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold tracking-[0.12em] uppercase ${PROTO_STYLE[proto]}`}>

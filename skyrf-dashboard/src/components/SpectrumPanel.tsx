@@ -80,7 +80,7 @@ export function SpectrumPanel({ spectrum, labels, running }: Props) {
       ctx.font = '8px "JetBrains Mono", monospace';
       ctx.fillText('BLE ADV', bleStart + 1.5 * cw, height - 4);
       ctx.fillStyle = '#00e5ff';
-      ctx.fillText('802.15.4 · 2.4 GHz', (cols - 3) * cw / 2, height - 4);
+      ctx.fillText('2.4 GHz · multi-protocolo', (cols - 3) * cw / 2, height - 4);
     };
 
     render();
