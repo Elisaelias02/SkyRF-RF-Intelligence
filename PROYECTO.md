@@ -71,7 +71,7 @@ Núcleo: Python + scikit-learn + Scapy + rich. La web llega después encima del 
 
 ---
 
-## 5. Roadmap (alineado a la saga de videos)
+## 5. Roadmap 
 
 | Fase | Entregable | 
 |---|---|
@@ -82,7 +82,7 @@ Núcleo: Python + scikit-learn + Scapy + rich. La web llega después encima del 
 
 ---
 
-## 6. Ética y marco legal (público, en el README del repo)
+## 6. Ética y marco legal 
 
 - Todo el desarrollo y capturas sobre **dispositivos propios en laboratorio controlado**.
 - El dataset nunca incluirá tráfico de terceros identificable.
