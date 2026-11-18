@@ -1,6 +1,6 @@
-# SkyRF 🐱
+# SkyRF 
 
-**RF intelligence framework** para seguridad IoT — clasificación automática de señales, playbooks de ataque automatizados y dashboard en vivo sobre **CatSniffer V3**. Proyecto de investigación **by Cinn4mor0ll**. Nombrado por Sky 🐾, la gata que olfatea el espectro.
+**RF intelligence framework** para seguridad IoT — clasificación automática de señales, playbooks de ataque automatizados y dashboard en vivo sobre **CatSniffer V3**. Proyecto de investigación **by Cinn4mor0ll**. Nombrado por Sky 🐾, mi gatita que olfatea el espectro.
 
 > Todo el desarrollo y las capturas son sobre dispositivos propios en laboratorio controlado. Uso exclusivo para investigación y auditoría autorizada — mismo marco que KillerBee/Sniffle/Kismet.
 
@@ -67,9 +67,9 @@ Accuracy actual sobre datos sintéticos: validación del pipeline, **no** del mo
 
 ## Estado y limitaciones honestas
 
-- ✅ Clasificador + features + CLI · bridge WebSocket · dashboard · playbooks con crypto verificada por round-trip (`selftest` 4/4).
-- ⚠️ Los playbooks están **verificados criptográficamente pero no contra hardware aún**: el CC1352P7 del CatSniffer es RX-only con el firmware sniffer — la inyección (TX) requiere un segundo dongle con firmware de inyección o un CC2531.
-- ⚠️ La captura de llaves asume la TC link key por defecto (el caso común en dispositivos consumer).
+- Clasificador + features + CLI · bridge WebSocket · dashboard · playbooks con crypto verificada por round-trip (`selftest` 4/4).
+- Los playbooks están **verificados criptográficamente pero no contra hardware aún**: el CC1352P7 del CatSniffer es RX-only con el firmware sniffer — la inyección (TX) requiere un segundo dongle con firmware de inyección o un CC2531.
+- La captura de llaves asume la TC link key por defecto (el caso común en dispositivos consumer).
 
 ## Estructura
 
