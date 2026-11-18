@@ -21,7 +21,7 @@ Todo sobre tráfico **cifrado o no** — la tesis central del proyecto es que la
 
 ---
 
-## 2. Preguntas de investigación (la parte publicable)
+## 2. Preguntas de investigación 
 
 - **RQ1 — Fingerprinting de dispositivos:** ¿Se puede clasificar el *tipo* de dispositivo IoT (foco, sensor de puerta, enchufe, cerradura, wearable) usando únicamente metadata 802.15.4/BLE — tamaños de paquete, tiempos inter-llegada, bursts, duty cycle — con F1 > 0.90, sin descifrar nada?
 - **RQ2 — Inferencia de eventos:** ¿Se pueden inferir eventos físicos ("puerta abierta", "persona despierta", "casa vacía") solo del patrón temporal del tráfico cifrado?
@@ -31,7 +31,7 @@ Todo sobre tráfico **cifrado o no** — la tesis central del proyecto es que la
 
 ---
 
-## 3. Dataset propio (el activo más valioso)
+## 3. Dataset propio 
 
 No existe un dataset público bueno de tráfico multiprotocolo IoT etiquetado a nivel de metadata. **Vamos a crearlo**:
 
@@ -75,10 +75,10 @@ Núcleo: Python + scikit-learn + Scapy + rich (terminal cyan). La web llega desp
 
 | Fase | Entregable | Estado | Video |
 |---|---|---|---|
-| **1** | Clasificador de protocolo/dispositivo + pipeline de captura real | ✅ hecho | Video kill chain (teaser del proyecto al final) |
-| **2** | transport-key-watcher automático (dentro del bridge) | ✅ hecho · falta dataset propio y fingerprinting real | "Construí una máquina que escucha casas" |
-| **3** | Playbooks de ataque + dashboard web + bridge WebSocket | ✅ hecho (crypto verificada; TX requiere 2º dongle) | "El ataque completo, sin tocar el teclado" |
-| **4** | Dataset público + writeup de investigación (RQ1–3 con métricas) | pendiente | "Lo que tu casa revela: la investigación completa" |
+| **1** | Clasificador de protocolo/dispositivo + pipeline de captura real | 
+| **2** | transport-key-watcher automático (dentro del bridge) | 
+| **3** | Playbooks de ataque + dashboard web + bridge WebSocket | 
+| **4** | Dataset público + writeup de investigación (RQ1–3 con métricas) | 
 
 ---
 
@@ -87,4 +87,4 @@ Núcleo: Python + scikit-learn + Scapy + rich (terminal cyan). La web llega desp
 - Todo el desarrollo y capturas sobre **dispositivos propios en laboratorio controlado**.
 - El dataset nunca incluirá tráfico de terceros identificable.
 - Los playbooks ofensivos son para investigación autorizada y auditoría de redes propias — mismo marco legal que KillerBee/Sniffle/Kismet.
-- El proyecto tiene explícitamente un módulo defensivo (RQ3) como parte central, no como adorno.
+- El proyecto tiene explícitamente un módulo defensivo como parte central, no como adorno.
