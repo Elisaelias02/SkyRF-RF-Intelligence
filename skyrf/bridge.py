@@ -79,22 +79,71 @@ async def handler(ws) -> None:
 
 # ----------------------------- fuentes de captura ----------------------------
 
-def _emit_packet(frame: bytes, channel: int, rssi: int | None, watcher) -> None:
-    try:
-        mac = parse_mac(frame)
-    except ValueError:
-        src, dst = "", ""
+BLE_ADV_AA = bytes.fromhex("8e89bed6")  # access address de advertising (al aire, LSB first)
+
+# PDU type (nibble bajo del primer byte del header) → tipo de frame para la UI
+_BLE_PDU_FRAME_TYPE = {
+    0x00: "beacon",   # ADV_IND
+    0x01: "data",     # ADV_DIRECT_IND
+    0x02: "beacon",   # ADV_NONCONN_IND
+    0x03: "beacon",   # ADV_SCAN_IND
+    0x04: "command",  # SCAN_REQ
+    0x05: "data",     # SCAN_RSP
+    0x06: "command",  # CONNECT_IND / AUX_CONNECT_REQ
+}
+
+
+def parse_ble_adv(frame: bytes) -> dict | None:
+    """Parsea un PDU de advertising BLE (canales 37-39).
+
+    Tolera volcados con o sin el access address (0x8E89BED6) al inicio.
+    Devuelve {len, src, frameType} o None si no es un ADV PDU reconocible.
+    """
+    b = bytes(frame)
+    i = b.find(BLE_ADV_AA)
+    if 0 <= i <= 1:
+        b = b[i + 4:]                      # volcado con AA: el PDU empieza después
+    if len(b) < 8:
+        return None
+    pdu_len = b[1] & 0x3F                  # header byte 1: length (6 bits)
+    payload = b[2:2 + pdu_len]
+    if len(payload) < 6:
+        return None
+    adva = payload[:6]                     # AdvA: BD_ADDR little-endian al aire
+    src = ":".join(f"{x:02X}" for x in reversed(adva))
+    return {
+        "len": 2 + pdu_len,
+        "src": src,
+        "frameType": _BLE_PDU_FRAME_TYPE.get(b[0] & 0x0F, "data"),
+    }
+
+
+def _emit_packet(frame: bytes, channel: int, rssi: int | None, watcher,
+                 proto: str = "zigbee") -> None:
+    if proto == "ble":
+        adv = parse_ble_adv(frame)
+        if adv is None:
+            return                         # no-ADV (data channels) o basura: fuera
+        src, dst, frame_type, plen = adv["src"], "", adv["frameType"], adv["len"]
     else:
-        src, dst = f"0x{mac['src']:04X}", f"0x{mac['dst']:04X}"
+        try:
+            mac = parse_mac(frame)
+        except ValueError:
+            src, dst = "", ""
+        else:
+            src, dst = f"0x{mac['src']:04X}", f"0x{mac['dst']:04X}"
+        frame_type, plen = "data", len(frame)
     broadcast({
-        "type": "packet", "t": time.time(), "len": len(frame),
+        "type": "packet", "t": time.time(), "len": plen,
         "channel": channel, "rssi": rssi, "src": src, "dst": dst,
-        "frameType": "data",
+        "frameType": frame_type,
     })
-    watcher.feed(frame)
+    if watcher is not None:                # el watcher es Zigbee-only
+        watcher.feed(frame)
 
 
-def follow_hex_file(path: str, channel: int, watcher) -> None:
+def follow_hex_file(path: str, channel: int, watcher,
+                    proto: str = "zigbee") -> None:
     """Sigue un archivo hex creciente (tail -f). Un frame por línea."""
     pos = 0
     buf = ""
@@ -114,14 +163,16 @@ def follow_hex_file(path: str, channel: int, watcher) -> None:
                 if not line:
                     continue
                 try:
-                    _emit_packet(bytes.fromhex(line), channel, None, watcher)
+                    _emit_packet(bytes.fromhex(line), channel, None, watcher,
+                                 proto=proto)
                 except ValueError:
                     pass  # línea incompleta o no-hex: se ignora
         else:
             time.sleep(0.1)
 
 
-def follow_pcap_file(path: str, channel: int, watcher) -> None:
+def follow_pcap_file(path: str, channel: int, watcher,
+                     proto: str = "zigbee") -> None:
     """Sigue un pcap/pcapng creciente (captura de Wireshark/catnip).
 
     Estrategia: re-lectura completa por polling, emitiendo solo los paquetes
@@ -141,7 +192,7 @@ def follow_pcap_file(path: str, channel: int, watcher) -> None:
 
         for pkt in packets[emitted:]:
             emitted += 1
-            _emit_packet(bytes(pkt), channel, None, watcher)
+            _emit_packet(bytes(pkt), channel, None, watcher, proto=proto)
         time.sleep(0.3)
 
 
@@ -154,11 +205,17 @@ def main() -> int:
                      help="sigue un volcado hex de catnip (--raw)")
     src.add_argument("--pcap-follow", metavar="ARCHIVO",
                      help="sigue un pcap/pcapng de Wireshark/catnip")
-    ap.add_argument("--channel", type=int, required=True,
-                    help="canal de captura (Zigbee 11-26)")
+    ap.add_argument("--proto", choices=["zigbee", "ble"], default="zigbee",
+                    help="protocolo del volcado (zigbee cubre 802.15.4: "
+                         "Zigbee y Thread; ble = advertising 37-39)")
+    ap.add_argument("--channel", type=int, default=None,
+                    help="canal de captura (Zigbee/Thread 11-26; BLE: 37 por "
+                         "defecto, etiqueta de los canales de advertising)")
     ap.add_argument("--host", default=HOST)
     ap.add_argument("--port", type=int, default=PORT)
     args = ap.parse_args()
+    if args.channel is None:
+        args.channel = 37 if args.proto == "ble" else 15
 
     def on_key(net) -> None:
         broadcast({
@@ -173,12 +230,16 @@ def main() -> int:
         })
         print(f"\n  ⚡ NETWORK KEY: {net.network_key.hex()}  ({net.summary()})\n")
 
-    watcher = TransportKeyWatcher(on_key_captured=on_key)
+    watcher = TransportKeyWatcher(on_key_captured=on_key) \
+        if args.proto == "zigbee" else None
+    watcher_line = ("transport-key-watcher: ACTIVO (TC link key por defecto)"
+                    if watcher else
+                    "transport-key-watcher: N/A (BLE no usa Transport Key)")
 
     print(f"""
   SkyRF bridge v{__version__} — ws://{args.host}:{args.port}
-  Fuente: {args.raw_follow or args.pcap_follow}  (canal {args.channel})
-  transport-key-watcher: ACTIVO (TC link key por defecto)
+  Fuente: {args.raw_follow or args.pcap_follow}  ({args.proto}, canal {args.channel})
+  {watcher_line}
   Abre el dashboard y pulsa CAPTURAR. Ctrl+C para salir.
 """)
 
@@ -191,7 +252,8 @@ def main() -> int:
     import threading
     target = (follow_hex_file if args.raw_follow else follow_pcap_file)
     path = args.raw_follow or args.pcap_follow
-    t = threading.Thread(target=target, args=(path, args.channel, watcher),
+    t = threading.Thread(target=target,
+                         args=(path, args.channel, watcher, args.proto),
                          daemon=True)
     t.start()
 
