@@ -74,7 +74,7 @@ Núcleo: Python + scikit-learn + Scapy + rich. La web llega después encima del 
 ## 5. Roadmap (alineado a la saga de videos)
 
 | Fase | Entregable | 
-|---|---|---|---|
+|---|---|
 | **1** | Clasificador de protocolo/dispositivo + pipeline de captura real | 
 | **2** | transport-key-watcher automático (dentro del bridge) | 
 | **3** | Playbooks de ataque + dashboard web + bridge WebSocket | 
