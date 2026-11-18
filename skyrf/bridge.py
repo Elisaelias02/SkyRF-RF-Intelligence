@@ -86,7 +86,9 @@ async def handler(ws) -> None:
 
 # ----------------------------- fuentes de captura ----------------------------
 
-BLE_ADV_AA = bytes.fromhex("8e89bed6")  # access address de advertising (al aire, LSB first)
+# Access address de advertising (0x8E89BED6) tal como aparece en el pcap de
+# Sniffle: uint32 little-endian -> bytes d6 be 89 8e (ojo: no el valor "de spec").
+BLE_ADV_AA = bytes.fromhex("d6be898e")
 
 # PDU type (nibble bajo del primer byte del header) → tipo de frame para la UI
 _BLE_PDU_FRAME_TYPE = {
@@ -111,11 +113,14 @@ def parse_ble_adv(frame: bytes) -> dict | None:
     Devuelve {len, src, frameType} o None si no es un ADV PDU reconocible.
     """
     b = bytes(frame)
-    i = b.find(BLE_ADV_AA)
-    if i > 12:
-        i = -1                             # más allá del offset 12 = payload, no header
-    if i >= 0:
-        b = b[i + 4:]
+    # Localización determinista del AA: el PHDR también lleva el AA de
+    # referencia (offset 4), así que NO se puede buscar la secuencia a ciegas.
+    if len(b) >= 14 + 8 and b[10:14] == BLE_ADV_AA:
+        b = b[14:]                         # pcap DLT 256: PHDR(10B) + AA + PDU + CRC
+    elif len(b) >= 4 + 8 and b[:4] == BLE_ADV_AA:
+        b = b[4:]                          # DLT 251 / volcado crudo: AA + PDU
+    else:
+        return None                        # data channel u otro AA: fuera
     if len(b) < 8:
         return None
     pdu_len = b[1] & 0x3F                  # header byte 1: length (6 bits)
