@@ -34,7 +34,7 @@ interface Props {
 
 export function DeviceTable({ devices, elapsed, filter, onSelect }: Props) {
   const rows = devices.filter(d =>
-    filter === 'all' || (d.cls?.label ?? null) === filter);
+    filter === 'all' || (d.proto ?? d.cls?.label ?? null) === filter);
 
   return (
     <div className="panel overflow-hidden flex flex-col min-h-0">
@@ -56,7 +56,7 @@ export function DeviceTable({ devices, elapsed, filter, onSelect }: Props) {
           <tbody>
             {rows.map(d => {
               const conf = d.cls ? Math.round(d.cls.confidence * 100) : null;
-              const proto = d.cls?.label;
+              const proto = d.proto ?? d.cls?.label;
               const pps = d.ppsHistory[d.ppsHistory.length - 1] ?? 0;
               return (
                 <tr

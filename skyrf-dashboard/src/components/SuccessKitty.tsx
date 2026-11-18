@@ -10,9 +10,11 @@ import type { KeyCapture } from "@/lib/rf/engine";
 export function SuccessKitty({
   tick,
   keyCapture,
+  label,
 }: {
   tick: number;
   keyCapture: KeyCapture | null;
+  label?: string;
 }) {
   const [visible, setVisible] = useState(false);
 
@@ -79,7 +81,7 @@ export function SuccessKitty({
             ¡BUEN ESE, SKY!
           </div>
           <div className="mt-1 font-mono text-sm text-cyan-200/80">
-            NETWORK KEY CAPTURADA
+            {label ?? 'NETWORK KEY CAPTURADA'}
           </div>
         </div>
 

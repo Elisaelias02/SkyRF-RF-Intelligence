@@ -9,6 +9,7 @@ import { SpectrumPanel } from '@/components/SpectrumPanel';
 import { DeviceDrawer } from '@/components/DeviceDrawer';
 import { BridgeDialog } from '@/components/BridgeDialog';
 import { SuccessKitty } from '@/components/SuccessKitty';
+import { PlaybooksPanel } from '@/components/PlaybooksPanel';
 
 export default function App() {
   const [snap, setSnap] = useState<Snapshot>(() => engine.getSnapshot());
@@ -55,6 +56,8 @@ export default function App() {
           </div>
         </div>
 
+        <PlaybooksPanel snap={snap} />
+
         <SpectrumPanel
           spectrum={snap.spectrum}
           labels={snap.spectrumLabels}
@@ -73,7 +76,7 @@ export default function App() {
 
       <DeviceDrawer device={selectedLive} onClose={() => setSelected(null)} />
       <BridgeDialog open={bridgeOpen} wsStatus={snap.wsStatus} onClose={() => setBridgeOpen(false)} />
-      <SuccessKitty tick={snap.successTick} keyCapture={snap.keyCaptured} />
+      <SuccessKitty tick={snap.successTick} keyCapture={snap.keyCaptured} label={snap.successLabel} />
     </div>
   );
 }

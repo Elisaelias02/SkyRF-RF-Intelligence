@@ -19,6 +19,7 @@ export interface Device {
   ppsHistory: number[];
   firstSeen: number;
   lastSeen: number;
+  proto?: Protocol;         // verdad del bridge (él sabe qué está sniffando)
   cls?: Classification;
 }
 
@@ -38,6 +39,13 @@ export interface KeyCapture {
   networkKey: string;
 }
 
+export interface PlaybookState {
+  running: string | null;   // nombre del playbook en ejecución
+  log: string[];
+  lastName: string | null;
+  lastOk: boolean | null;
+}
+
 export interface Snapshot {
   wsStatus: WsStatus;
   capturing: boolean;
@@ -50,6 +58,10 @@ export interface Snapshot {
   networksFound: number;
   keyCaptured: KeyCapture | null;
   successTick: number;      // se incrementa en cada captura exitosa (overlay)
+  successLabel: string;     // qué se celebra en el overlay
+  bridgeSource: string | null;
+  bridgeProto: string | null;
+  playbook: PlaybookState;
 }
 
 const SPECTRUM_LABELS = [
@@ -73,7 +85,13 @@ export class Engine {
   private alertId = 0;
   private keyCaptured: Snapshot['keyCaptured'] = null;
   private successTick = 0;
+  private successLabel = 'NETWORK KEY CAPTURADA';
   private pans = new Set<string>();
+  private bridgeSource: string | null = null;
+  private bridgeProto: string | null = null;
+  private playbook: PlaybookState = {
+    running: null, log: [], lastName: null, lastOk: null,
+  };
 
   constructor() {
     this.classifier.train();
@@ -110,6 +128,40 @@ export class Engine {
     let msg: Record<string, unknown>;
     try { msg = JSON.parse(raw); } catch { return; }
 
+    if (msg.type === 'hello') {
+      this.bridgeSource = typeof msg.source === 'string' ? msg.source : null;
+      this.bridgeProto = typeof msg.proto === 'string' ? msg.proto : null;
+      return;
+    }
+    if (msg.type === 'playbook_started') {
+      this.playbook.running = String(msg.playbook ?? '');
+      this.playbook.lastName = this.playbook.running;
+      this.playbook.lastOk = null;
+      this.pushPlaybookLine(`┌─ EJECUTANDO: ${String(msg.cmd ?? msg.playbook ?? '')}`);
+      return;
+    }
+    if (msg.type === 'playbook_out') {
+      // el progreso del cracker usa \r; nos quedamos con el último segmento
+      this.pushPlaybookLine(String(msg.line ?? '').split('\r').pop() ?? '');
+      return;
+    }
+    if (msg.type === 'playbook_done') {
+      const ok = msg.ok === true;
+      const name = String(msg.playbook ?? this.playbook.lastName ?? '');
+      this.playbook.running = null;
+      this.playbook.lastOk = ok;
+      this.playbook.lastName = name || null;
+      this.pushPlaybookLine(ok
+        ? '└─ [★] PLAYBOOK COMPLETADO CON ÉXITO'
+        : `└─ [✗] playbook terminó sin éxito (rc=${String(msg.code)})`);
+      if (ok) {
+        this.successLabel = name === 'ble_legacy'
+          ? 'PAIRING CRACKEADO'
+          : 'SELFTEST SUPERADO';
+        this.successTick++;
+      }
+      return;
+    }
     if (msg.type === 'alert') {
       this.pushAlert(
         msg.level as Alert['level'], String(msg.title), String(msg.detail));
@@ -120,6 +172,7 @@ export class Engine {
         panId: String(msg.panId), tcAddr: String(msg.tcAddr),
         networkKey: String(msg.networkKey),
       };
+      this.successLabel = 'NETWORK KEY CAPTURADA';
       this.successTick++;
       return;
     }
@@ -129,18 +182,21 @@ export class Engine {
     const now = (performance.now() - this.startedAt) / 1000;
     const channel = Number(msg.channel ?? 0);
     const len = Number(msg.len ?? 0);
+    const proto = typeof msg.proto === 'string'
+      ? msg.proto as Protocol : undefined;
 
     let d = this.devices.get(src);
     if (!d) {
       d = {
         id: src, rssi: null, channel, pkts: [], ppsHistory: [],
-        firstSeen: now, lastSeen: now,
+        firstSeen: now, lastSeen: now, proto,
       };
       this.devices.set(src, d);
       if (src !== 'desconocido') {
         this.pushAlert('info', 'DISPOSITIVO NUEVO', `${src} · canal ${channel}`);
       }
     }
+    if (proto) d.proto = proto;
     d.channel = channel;
     d.lastSeen = now;
     d.rssi = typeof msg.rssi === 'number' ? msg.rssi : null;
@@ -172,7 +228,8 @@ export class Engine {
         d.cls = this.classifier.classify(
           extractWindow(
             win.map(p => ({
-              t: p.t, len: p.len, proto: 'zigbee' as Protocol,
+              t: p.t, len: p.len,
+              proto: d.proto ?? ('zigbee' as Protocol),
               channel: p.channel, src: d.id,
               frameType: p.frameType as 'data' | 'beacon' | 'ack' | 'command',
             })),
@@ -216,6 +273,32 @@ export class Engine {
     if (this.alerts.length > 60) this.alerts.pop();
   }
 
+  /* ----------------------------- playbooks -------------------------------- */
+
+  private pushPlaybookLine(line: string) {
+    this.playbook.log.push(line);
+    if (this.playbook.log.length > 400) this.playbook.log.shift();
+  }
+
+  runPlaybook(name: 'ble_legacy' | 'selftest') {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.pushPlaybookLine('[✗] Bridge offline — no puedo lanzar el playbook');
+      return;
+    }
+    if (this.playbook.running) return;
+    this.playbook.log = [];
+    this.playbook.lastOk = null;
+    this.ws.send(JSON.stringify({
+      type: 'run_playbook', id: String(Date.now()), playbook: name,
+    }));
+  }
+
+  clearPlaybookLog() {
+    this.playbook.log = [];
+    this.playbook.lastOk = null;
+    this.playbook.lastName = null;
+  }
+
   getSnapshot(): Snapshot {
     return {
       wsStatus: this.wsStatus,
@@ -229,6 +312,15 @@ export class Engine {
       networksFound: this.pans.size || (this.keyCaptured ? 1 : 0),
       keyCaptured: this.keyCaptured,
       successTick: this.successTick,
+      successLabel: this.successLabel,
+      bridgeSource: this.bridgeSource,
+      bridgeProto: this.bridgeProto,
+      playbook: {
+        running: this.playbook.running,
+        log: [...this.playbook.log],
+        lastName: this.playbook.lastName,
+        lastOk: this.playbook.lastOk,
+      },
     };
   }
 }
