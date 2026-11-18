@@ -72,16 +72,114 @@ async def _send_all(data: str) -> None:
         CLIENTS.discard(ws)
 
 
+# Estado de la fuente actual (lo fija main()); se anuncia en el hello para que
+# el dashboard sepa qué captura está viva y qué protocolo se está sniffando.
+CURRENT_SOURCE: str | None = None
+CURRENT_PROTO: str = "zigbee"
+PLAYBOOK_RUNNING = False
+
+
 async def handler(ws) -> None:
     CLIENTS.add(ws)
     await ws.send(json.dumps({
         "type": "hello", "tool": "skyrf-bridge", "version": __version__,
+        "source": CURRENT_SOURCE, "proto": CURRENT_PROTO,
     }))
     try:
-        async for _ in ws:  # el dashboard no envía comandos (Fase 3)
-            pass
+        async for raw in ws:
+            try:
+                await handle_command(ws, raw)
+            except Exception as e:
+                await ws.send(json.dumps({
+                    "type": "playbook_done", "id": None, "playbook": None,
+                    "ok": False, "code": -1, "error": str(e),
+                }))
     finally:
         CLIENTS.discard(ws)
+
+
+# ------------------------- ejecución de playbooks ---------------------------
+# El dashboard manda {"type":"run_playbook","id":...,"playbook":...,"pcap":...}
+# y el bridge ejecuta el módulo correspondiente streameando su salida línea a
+# línea. Lista blanca cerrada: solo estos dos módulos, sin shell de por medio.
+
+PLAYBOOKS = {
+    "ble_legacy": "skyrf.playbooks.ble_legacy",
+    "selftest": "skyrf.playbooks.selftest",
+}
+
+
+async def handle_command(ws, raw: str) -> None:
+    global PLAYBOOK_RUNNING
+    try:
+        msg = json.loads(raw)
+    except ValueError:
+        return
+    if msg.get("type") != "run_playbook":
+        return
+
+    name = str(msg.get("playbook") or "")
+    req_id = msg.get("id")
+    if name not in PLAYBOOKS:
+        await ws.send(json.dumps({
+            "type": "playbook_done", "id": req_id, "playbook": name,
+            "ok": False, "code": -1, "error": f"playbook desconocido: {name}",
+        }))
+        return
+    if PLAYBOOK_RUNNING:
+        await ws.send(json.dumps({
+            "type": "playbook_out", "id": req_id,
+            "line": "[!] Ya hay un playbook en ejecución — espera a que termine.",
+        }))
+        await ws.send(json.dumps({
+            "type": "playbook_done", "id": req_id, "playbook": name,
+            "ok": False, "code": -1,
+        }))
+        return
+
+    argv = [sys.executable, "-m", PLAYBOOKS[name]]
+    if name == "ble_legacy":
+        target = msg.get("pcap") or CURRENT_SOURCE
+        if (not target or not isinstance(target, str)
+                or not target.endswith((".pcap", ".pcapng"))
+                or not os.path.isfile(target)):
+            await ws.send(json.dumps({
+                "type": "playbook_out", "id": req_id,
+                "line": f"[✗] Captura no válida o inexistente: {target}",
+            }))
+            await ws.send(json.dumps({
+                "type": "playbook_done", "id": req_id, "playbook": name,
+                "ok": False, "code": -1,
+            }))
+            return
+        out = target.rsplit(".", 1)[0] + "_descifrado.pcapng"
+        argv += [target, "-o", out]
+
+    PLAYBOOK_RUNNING = True
+    await ws.send(json.dumps({
+        "type": "playbook_started", "id": req_id, "playbook": name,
+        "cmd": "python " + " ".join(argv[1:]),
+    }))
+    print(f"  » playbook {name} lanzado desde el dashboard")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        assert proc.stdout is not None
+        async for chunk in proc.stdout:
+            for line in chunk.decode(errors="replace").splitlines():
+                print(f"  │ {line}")
+                await ws.send(json.dumps({
+                    "type": "playbook_out", "id": req_id, "line": line,
+                }))
+        rc = await proc.wait()
+    finally:
+        PLAYBOOK_RUNNING = False
+    await ws.send(json.dumps({
+        "type": "playbook_done", "id": req_id, "playbook": name,
+        "ok": rc == 0, "code": rc,
+    }))
+    print(f"  » playbook {name} terminó (rc={rc})")
 
 
 # ----------------------------- fuentes de captura ----------------------------
@@ -154,6 +252,9 @@ def _emit_packet(frame: bytes, channel: int, rssi: int | None, consumers,
         if adv is None:
             return                         # no-ADV (data channels) o basura: fuera
         src, dst, frame_type, plen = adv["src"], "", adv["frameType"], adv["len"]
+        # RSSI real: vive en el PHDR del pcap (byte 1, con signo) si no vino ya
+        if rssi is None and len(frame) >= 14 and frame[10:14] == BLE_ADV_AA:
+            rssi = struct.unpack_from("<b", frame, 1)[0]
     elif proto in ("lora", "fsk"):
         node = parse_lora_frame(frame)
         if node is None:
@@ -170,7 +271,7 @@ def _emit_packet(frame: bytes, channel: int, rssi: int | None, consumers,
     broadcast({
         "type": "packet", "t": time.time(), "len": plen,
         "channel": channel, "rssi": rssi, "src": src, "dst": dst,
-        "frameType": frame_type,
+        "frameType": frame_type, "proto": proto,
     })
     for consume in consumers:              # watchers de seguridad del protocolo
         try:
@@ -246,7 +347,7 @@ def follow_pcap_file(path: str, channel: int, consumers,
 
 
 def main() -> int:
-    global LOOP
+    global LOOP, CURRENT_SOURCE, CURRENT_PROTO
     ap = argparse.ArgumentParser(prog="skyrf bridge",
                                  description="Puente CatSniffer → dashboard SkyRF")
     src = ap.add_mutually_exclusive_group(required=True)
@@ -322,6 +423,7 @@ def main() -> int:
     import threading
     target = (follow_hex_file if args.raw_follow else follow_pcap_file)
     path = args.raw_follow or args.pcap_follow
+    CURRENT_SOURCE, CURRENT_PROTO = path, args.proto
     t = threading.Thread(target=target,
                          args=(path, args.channel, consumers, args.proto),
                          daemon=True)
