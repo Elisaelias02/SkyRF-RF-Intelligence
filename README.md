@@ -1,4 +1,4 @@
-# SkyRF 🐱
+# SkyRF 
 
 **RF intelligence framework** para seguridad IoT — clasificación automática de señales, playbooks de ataque automatizados y dashboard en vivo sobre **CatSniffer V3**. Proyecto de investigación **by Cinn4mor0ll**. Nombrado por Sky 🐾, la gata que olfatea el espectro.
 
