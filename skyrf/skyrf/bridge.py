@@ -84,6 +84,7 @@ async def handler(ws) -> None:
     await ws.send(json.dumps({
         "type": "hello", "tool": "skyrf-bridge", "version": __version__,
         "source": CURRENT_SOURCE, "proto": CURRENT_PROTO,
+        "attack": attack_status(),
     }))
     try:
         async for raw in ws:
@@ -115,11 +116,18 @@ async def handle_command(ws, raw: str) -> None:
         msg = json.loads(raw)
     except ValueError:
         return
-    if msg.get("type") != "run_playbook":
+    mtype = msg.get("type")
+    req_id = msg.get("id")
+    if mtype == "victim_mode":
+        await victim_mode(ws, req_id, bool(msg.get("start")))
+        return
+    if mtype == "capture_control":
+        await capture_control(ws, req_id, msg)
+        return
+    if mtype != "run_playbook":
         return
 
     name = str(msg.get("playbook") or "")
-    req_id = msg.get("id")
     if name not in PLAYBOOKS:
         await ws.send(json.dumps({
             "type": "playbook_done", "id": req_id, "playbook": name,
@@ -180,6 +188,283 @@ async def handle_command(ws, raw: str) -> None:
         "ok": rc == 0, "code": rc,
     }))
     print(f"  » playbook {name} terminó (rc={rc})")
+
+
+# --------------------------- orquestación de ataque --------------------------
+# El dashboard también puede gobernar la cadena completa del PoC BLE Legacy:
+#   1. victim_mode  → prepara la Kali como víctima (Legacy Pairing forzado)
+#   2. capture_control → arranca/para tshark+Sniffle escribiendo el pcap
+#   3. run_playbook ble_legacy → crackea el pairing sobre ese pcap
+#
+# Blindaje: sin shell intermedio para tshark (argv fijo, parámetros validados
+# con regex); los scripts de víctima son fijos y usan `sudo -n`, así que si no
+# existe la regla NOPASSWD (ver README §4) fallan limpio, sin prompt colgado.
+
+_MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+_SERPORT_RE = re.compile(r"^/dev/ttyACM\d+$")
+_OUTFILE_RE = re.compile(r"^/[A-Za-z0-9_\-/\.]+\.pcapng$")
+
+CAPTURE_PROC: asyncio.subprocess.Process | None = None
+CAPTURE_OUT: str | None = None
+VICTIM_ACTIVE = False
+VICTIM_ADDR: str | None = None
+
+# Scripts fijos (sin parámetros del usuario -> nada que inyectar).
+# ON:  apaga el adaptador, desactiva Secure Connections (fuerza Legacy
+#      Pairing), lo enciende y lo deja emparejable/descubierto con un agente
+#      capaz de mostrar passkey.
+# OFF: deshace todo y devuelve el adaptador a Secure Connections.
+VICTIM_ON_SCRIPT = (
+    "sudo -n btmgmt power off && sudo -n btmgmt sc off && sudo -n btmgmt power on"
+    " && printf 'power on\\npairable on\\ndiscoverable on\\n"
+    "agent KeyboardOnly\\nadvertise on\\nquit\\n' | bluetoothctl"
+)
+VICTIM_OFF_SCRIPT = (
+    "printf 'advertise off\\nquit\\n' | bluetoothctl;"
+    " sudo -n btmgmt power off && sudo -n btmgmt sc on && sudo -n btmgmt power on"
+)
+
+
+def attack_status() -> dict:
+    return {
+        "type": "attack_status",
+        "capture": CAPTURE_PROC is not None and CAPTURE_PROC.returncode is None,
+        "captureOut": CAPTURE_OUT,
+        "victim": VICTIM_ACTIVE,
+        "victimAddr": VICTIM_ADDR,
+    }
+
+
+async def _stream_lines(ws, req_id, proc, tag: str) -> int:
+    """Reenvía stdout de un proceso al dashboard como eventos attack_out."""
+    assert proc.stdout is not None
+    async for chunk in proc.stdout:
+        for line in chunk.decode(errors="replace").splitlines():
+            print(f"  │[{tag}] {line}")
+            await ws.send(json.dumps(
+                {"type": "attack_out", "id": req_id, "tag": tag, "line": line}))
+    return await proc.wait()
+
+
+async def _run_script(ws, req_id, script: str, tag: str) -> int:
+    proc = await asyncio.create_subprocess_exec(
+        "bash", "-c", script,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    return await _stream_lines(ws, req_id, proc, tag)
+
+
+async def _broadcast_status() -> None:
+    data = json.dumps(attack_status())
+    await _send_all(data)
+
+
+async def victim_mode(ws, req_id, start: bool) -> None:
+    """Activa/desactiva la Kali como víctima BLE emparejable en modo Legacy."""
+    global VICTIM_ACTIVE, VICTIM_ADDR
+    tag = "victim"
+    await ws.send(json.dumps({
+        "type": "attack_out", "id": req_id, "tag": tag,
+        "line": ("[»] Activando modo víctima: Secure Connections OFF, "
+                 "Kali emparejable y visible…" if start else
+                 "[»] Desactivando modo víctima: restaurando Secure Connections…"),
+    }))
+    try:
+        rc = await _run_script(
+            ws, req_id, VICTIM_ON_SCRIPT if start else VICTIM_OFF_SCRIPT, tag)
+    except FileNotFoundError as e:
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": f"[✗] Falta una herramienta del sistema: {e}",
+        }))
+        await ws.send(json.dumps({
+            "type": "attack_done", "id": req_id, "action": "victim_mode",
+            "ok": False, "code": -1,
+        }))
+        return
+
+    ok = rc == 0
+    if ok and start:
+        addr = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bash", "-c", "hcitool dev | awk 'NR>1{print $2; exit}'",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL)
+            assert proc.stdout is not None
+            out, _ = await proc.communicate()
+            cand = out.decode(errors="replace").strip()
+            if _MAC_RE.match(cand):
+                addr = cand.upper()
+        except Exception:
+            pass
+        VICTIM_ACTIVE = True
+        VICTIM_ADDR = addr
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": (f"[★] Kali en modo víctima — BD_ADDR {addr}. Empareja el "
+                     "teléfono contra esta dirección." if addr else
+                     "[★] Kali en modo víctima (no pude leer el BD_ADDR, "
+                     "míralo con `hcitool dev`)."),
+        }))
+    elif ok:
+        VICTIM_ACTIVE = False
+        VICTIM_ADDR = None
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": "[✓] Modo víctima desactivado, adaptador restaurado.",
+        }))
+    else:
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": ("[✗] Falló (¿regla sudoers NOPASSWD para btmgmt/"
+                     "bluetoothctl/hcitool instalada? ver README §4)."),
+        }))
+    await ws.send(json.dumps({
+        "type": "attack_done", "id": req_id, "action": "victim_mode",
+        "ok": ok, "code": rc,
+    }))
+    await _broadcast_status()
+
+
+async def capture_control(ws, req_id, msg: dict) -> None:
+    """Arranca o detiene tshark+Sniffle escribiendo el pcap del ataque."""
+    global CAPTURE_PROC, CAPTURE_OUT
+    tag = "capture"
+    action = str(msg.get("action") or "")
+
+    if action == "stop":
+        if CAPTURE_PROC is None or CAPTURE_PROC.returncode is not None:
+            await ws.send(json.dumps({
+                "type": "attack_out", "id": req_id, "tag": tag,
+                "line": "[i] No hay captura en curso.",
+            }))
+            await ws.send(json.dumps({
+                "type": "attack_done", "id": req_id,
+                "action": "capture_stop", "ok": False, "code": -1,
+            }))
+            return
+        CAPTURE_PROC.terminate()
+        try:
+            await asyncio.wait_for(CAPTURE_PROC.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            CAPTURE_PROC.kill()
+            await CAPTURE_PROC.wait()
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": f"[✓] Captura detenida — pcap listo en {CAPTURE_OUT}. "
+                    "Ya puedes lanzar BLE LEGACY CRACK.",
+        }))
+        CAPTURE_PROC = None
+        await ws.send(json.dumps({
+            "type": "attack_done", "id": req_id,
+            "action": "capture_stop", "ok": True, "code": 0,
+        }))
+        await _broadcast_status()
+        return
+
+    if action != "start":
+        return
+
+    if CAPTURE_PROC is not None and CAPTURE_PROC.returncode is None:
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": "[!] Ya hay una captura en curso — deténla primero.",
+        }))
+        await ws.send(json.dumps({
+            "type": "attack_done", "id": req_id,
+            "action": "capture_start", "ok": False, "code": -1,
+        }))
+        return
+
+    serport = str(msg.get("serport") or "/dev/ttyACM0")
+    mac = str(msg.get("mac") or "").strip().upper()
+    out = str(msg.get("outfile") or "").strip() or (
+        CURRENT_SOURCE if CURRENT_SOURCE and CURRENT_SOURCE.endswith(".pcapng")
+        else "/tmp/skyrf_ataque.pcapng")
+
+    if not _SERPORT_RE.match(serport):
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": f"[✗] Puerto serie inválido: {serport}",
+        }))
+        await ws.send(json.dumps({
+            "type": "attack_done", "id": req_id,
+            "action": "capture_start", "ok": False, "code": -1,
+        }))
+        return
+    if mac and not _MAC_RE.match(mac):
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": f"[✗] MAC inválida: {mac}",
+        }))
+        await ws.send(json.dumps({
+            "type": "attack_done", "id": req_id,
+            "action": "capture_start", "ok": False, "code": -1,
+        }))
+        return
+    if (not _OUTFILE_RE.match(out)
+            or not (out.startswith("/home/") or out.startswith("/tmp/"))):
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": f"[✗] Ruta de salida inválida (debe ser /home/... o /tmp/... .pcapng): {out}",
+        }))
+        await ws.send(json.dumps({
+            "type": "attack_done", "id": req_id,
+            "action": "capture_start", "ok": False, "code": -1,
+        }))
+        return
+
+    argv = ["tshark", "-i", "sniffle",
+            "-o", f"extcap.sniffle.serport:{serport}"]
+    if mac:
+        argv += ["-o", f"extcap.sniffle.mac:{mac}"]
+    argv += ["-w", out]
+
+    await ws.send(json.dumps({
+        "type": "attack_out", "id": req_id, "tag": tag,
+        "line": "[»] Arrancando captura: " + " ".join(argv),
+    }))
+    try:
+        CAPTURE_PROC = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+    except FileNotFoundError:
+        CAPTURE_PROC = None
+        await ws.send(json.dumps({
+            "type": "attack_out", "id": req_id, "tag": tag,
+            "line": "[✗] tshark no está instalado o no está en el PATH.",
+        }))
+        await ws.send(json.dumps({
+            "type": "attack_done", "id": req_id,
+            "action": "capture_start", "ok": False, "code": -1,
+        }))
+        return
+
+    CAPTURE_OUT = out
+    asyncio.ensure_future(_capture_watchdog(CAPTURE_PROC))
+    await ws.send(json.dumps({
+        "type": "attack_done", "id": req_id,
+        "action": "capture_start", "ok": True, "code": 0,
+    }))
+    await _broadcast_status()
+
+
+async def _capture_watchdog(proc) -> None:
+    """Espera a que tshark muera solo (error, puerto ocupado, etc.) y avisa."""
+    global CAPTURE_PROC
+    assert proc.stdout is not None
+    async for chunk in proc.stdout:
+        for line in chunk.decode(errors="replace").splitlines():
+            print(f"  │[capture] {line}")
+            broadcast({"type": "attack_out", "id": None,
+                       "tag": "capture", "line": line})
+    rc = await proc.wait()
+    if CAPTURE_PROC is proc:
+        CAPTURE_PROC = None
+        broadcast({"type": "attack_out", "id": None, "tag": "capture",
+                   "line": f"[i] tshark terminó por su cuenta (rc={rc})."})
+        data = json.dumps(attack_status())
+        await _send_all(data)
 
 
 # ----------------------------- fuentes de captura ----------------------------
