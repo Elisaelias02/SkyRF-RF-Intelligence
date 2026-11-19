@@ -1,7 +1,7 @@
 # SkyRF — Framework de Inteligencia RF para IoT
 
 > Proyecto de investigación Cinn4mor0ll · Hardware: CatSniffer V3 (+ radio TX opcional)
-> Estado: Fases 1–3 en código — clasificador, bridge, dashboard y playbooks funcionando (crypto verificada; validación en hardware en curso)
+> Estado: Fases 1–3 en código — clasificador, bridge, dashboard y playbooks de los 4 stacks (Zigbee, BLE, LoRaWAN, Thread) funcionando (selftest 8/8: crypto verificada contra vectores oficiales; validación en hardware en curso)
 > Los bigotes del gato: sensores que sienten lo que no se ve.
 
 ---
@@ -21,7 +21,7 @@ Todo sobre tráfico **cifrado o no** — la tesis central del proyecto es que la
 
 ---
 
-## 2. Preguntas de investigación 
+## 2. Preguntas de investigación (la parte publicable)
 
 - **RQ1 — Fingerprinting de dispositivos:** ¿Se puede clasificar el *tipo* de dispositivo IoT (foco, sensor de puerta, enchufe, cerradura, wearable) usando únicamente metadata 802.15.4/BLE — tamaños de paquete, tiempos inter-llegada, bursts, duty cycle — con F1 > 0.90, sin descifrar nada?
 - **RQ2 — Inferencia de eventos:** ¿Se pueden inferir eventos físicos ("puerta abierta", "persona despierta", "casa vacía") solo del patrón temporal del tráfico cifrado?
@@ -31,7 +31,7 @@ Todo sobre tráfico **cifrado o no** — la tesis central del proyecto es que la
 
 ---
 
-## 3. Dataset propio 
+## 3. Dataset propio (el activo más valioso)
 
 No existe un dataset público bueno de tráfico multiprotocolo IoT etiquetado a nivel de metadata. **Vamos a crearlo**:
 
@@ -58,7 +58,10 @@ Formato: PCAP-NG (Kismet/catnip) + CSV de labels. Publicable al final del proyec
 ├─────────────────────────────────────────────────────────┤
 │  Orquestador de playbooks (Fase 2)                      │
 │   · skyrf.playbooks: transport-key-watcher,           │
-│     inyección ZCL, persistencia rogue                   │
+│     inyección ZCL, persistencia rogue (Zigbee)        │
+│   · ble_legacy: crack TK + STK + descifrado CCM (BLE) │
+│   · lorawan_auditor: FCnt reset / DevNonce (LoRa)     │
+│   · thread_watcher: MLE / comisionado 5684 (Thread)   │
 ├─────────────────────────────────────────────────────────┤
 │  Captura: skyrf.capture                               │
 │   · catnip_source (CatSniffer live)                     │
@@ -67,24 +70,24 @@ Formato: PCAP-NG (Kismet/catnip) + CSV de labels. Publicable al final del proyec
 └─────────────────────────────────────────────────────────┘
 ```
 
-Núcleo: Python + scikit-learn + Scapy + rich. La web llega después encima del mismo núcleo — no se reescribe nada.
+Núcleo: Python + scikit-learn + Scapy + rich (terminal cyan). La web llega después encima del mismo núcleo — no se reescribe nada.
 
 ---
 
-## 5. Roadmap 
+## 5. Roadmap (alineado a la saga de videos)
 
-| Fase | Entregable | 
-|---|---|
-| **1** | Clasificador de protocolo/dispositivo + pipeline de captura real | 
-| **2** | transport-key-watcher automático (dentro del bridge) | 
-| **3** | Playbooks de ataque + dashboard web + bridge WebSocket | 
-| **4** | Dataset público + writeup de investigación (RQ1–3 con métricas) | 
+| Fase | Entregable | Estado | Video |
+|---|---|---|---|
+| **1** | Clasificador de protocolo/dispositivo + pipeline de captura real | ✅ hecho | Video kill chain (teaser del proyecto al final) |
+| **2** | transport-key-watcher automático (dentro del bridge) | ✅ hecho · falta dataset propio y fingerprinting real | "Construí una máquina que escucha casas" |
+| **3** | Playbooks de ataque + dashboard web + bridge WebSocket | ✅ hecho (crypto verificada; TX requiere 2º dongle) | "El ataque completo, sin tocar el teclado" |
+| **4** | Dataset público + writeup de investigación (RQ1–3 con métricas) | pendiente | "Lo que tu casa revela: la investigación completa" |
 
 ---
 
-## 6. Ética y marco legal 
+## 6. Ética y marco legal (público, en el README del repo)
 
 - Todo el desarrollo y capturas sobre **dispositivos propios en laboratorio controlado**.
 - El dataset nunca incluirá tráfico de terceros identificable.
 - Los playbooks ofensivos son para investigación autorizada y auditoría de redes propias — mismo marco legal que KillerBee/Sniffle/Kismet.
-- El proyecto tiene explícitamente un módulo defensivo como parte central, no como adorno.
+- El proyecto tiene explícitamente un módulo defensivo (RQ3) como parte central, no como adorno.
