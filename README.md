@@ -1,6 +1,6 @@
-# SkyRF 
+# SkyRF 🐱
 
-**RF intelligence framework** para seguridad IoT — clasificación automática de señales, playbooks de ataque automatizados y dashboard en vivo sobre **CatSniffer V3**. Proyecto de investigación **by Cinn4mor0ll**. Nombrado por Sky 🐾, mi gatita que olfatea el espectro.
+**RF intelligence framework** para seguridad IoT — clasificación automática de señales, playbooks de ataque automatizados y dashboard en vivo sobre **CatSniffer V3**. Proyecto de investigación **by Cinn4mor0ll**. Nombrado por Sky 🐾, la gata que olfatea el espectro.
 
 > Todo el desarrollo y las capturas son sobre dispositivos propios en laboratorio controlado. Uso exclusivo para investigación y auditoría autorizada — mismo marco que KillerBee/Sniffle/Kismet.
 
@@ -8,12 +8,14 @@
 
 ```
 CatSniffer V3 ──catnip──► lab.hex ──skyrf.bridge──► ws://localhost:8765 ──► Dashboard SkyRF
-                                        │
-                                        └─► transport-key-watcher (en línea, captura la network key)
+                                        │                                        │
+                                        └─► transport-key-watcher (en línea)     └─► run_playbook (el dashboard
+                                            …y el dashboard devuelve órdenes:        lanza los playbooks con un
+                                            playbooks ejecutables desde la web       botón y ve la salida en vivo)
 ```
 
-- **`skyrf.bridge`** — puente WebSocket: sigue el raw-hex de catnip (o un pcapng de Wireshark) y streamea paquetes, alertas y capturas de llaves al dashboard.
-- **Dashboard** (`skyrf-dashboard/`, React + Vite) — clasificación en vivo por dispositivo, espectro waterfall, feed de eventos, y Sky celebra contigo cuando un ataque tiene éxito.
+- **`skyrf.bridge`** — puente WebSocket **bidireccional**: sigue el raw-hex de catnip (o un pcapng de Wireshark) y streamea paquetes, alertas y capturas de llaves al dashboard; además acepta órdenes `run_playbook` (lista blanca cerrada, sin shell), `victim_mode` (prepara la Kali como víctima BLE emparejable en modo Legacy) y `capture_control` (arranca/para tshark+Sniffle con parámetros validados por regex), devolviendo la salida del ataque en vivo.
+- **Dashboard** (`skyrf-dashboard/`, React + Vite) — clasificación en vivo por dispositivo, espectro waterfall, feed de eventos, **panel MODO ATAQUE con la secuencia BLE Legacy guiada en 3 pasos (víctima → captura → crack)**, panel de Playbooks con botones de ejecución y consola en vivo, y Sky celebra contigo cuando un ataque tiene éxito.
 - **Playbooks** (`skyrf/playbooks/`) — ataques Zigbee automatizados con criptografía real (AES-CCM, MIC verificado).
 - **Clasificador** — 14 features de metadata por ventana, RandomForest / centroides z-score. Protocolo hoy; dispositivo y evento cuando exista el dataset (ver `PROYECTO.md`).
 
@@ -40,8 +42,30 @@ python -m skyrf.bridge --pcap-follow ble.pcapng --proto ble         # BLE (ch 37
 python -m skyrf.bridge --raw-follow lora.raw --proto lora           # LoRa sub-GHz
 
 # 3 · Dashboard
-cd skyrf-dashboard && npm install && npm run build
-#    sirve dist/ y abre la página; pulsa CAPTURAR
+cd skyrf-dashboard && npx serve dist -l 3000     # dist/ ya viene compilado
+#    (o recompílalo: npm install && npm run build)
+#    abre la página y pulsa CAPTURAR
+
+# 4 · Ataques desde la web: sección PLAYBOOKS → EJECUTAR
+#    BLE LEGACY CRACK crackea la captura que el bridge sigue y exporta
+#    <captura>_descifrado.pcapng al lado de la original; SELFTEST corre la
+#    suite 8/8. La salida se streamea en la consola del panel, y si el
+#    ataque tiene éxito Sky te da el puñito.
+
+# 4b · Modo ataque end-to-end (BLE Legacy en 3 pasos, todo desde la web)
+#    El panel MODO ATAQUE gobierna la cadena completa:
+#      01 MODO VÍCTIMA   → la Kali se vuelve emparejable con Secure
+#                          Connections apagado (el teléfono cae a Legacy
+#                          Pairing y su PIN de 6 dígitos queda crackeable)
+#      02 CAPTURA        → tshark + Sniffle siguiendo la MAC de la víctima;
+#                          el bridge reenvía los paquetes al dashboard en vivo
+#      03 CRACK          → ble_legacy sobre el pcap recién capturado
+#    Empareja el teléfono contra la Kali entre los pasos 02 y 03.
+#
+#    Requisito: una regla sudoers NOPASSWD (el bridge usa `sudo -n`; sin ella
+#    los pasos 01-02 fallan limpio con un aviso en consola):
+echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/btmgmt, /usr/bin/bluetoothctl, /usr/bin/hcitool" \
+  | sudo tee /etc/sudoers.d/skyrf
 ```
 
 Nota: cada protocolo tiene su arquitectura de llaves — los playbooks son específicos por stack. Zigbee y Thread comparten PHY (802.15.4); BLE y LoRaWAN son mundos aparte. Los cuatro stacks del CatSniffer tienen playbook propio abajo.
@@ -92,11 +116,11 @@ Accuracy actual sobre datos sintéticos: validación del pipeline, **no** del mo
 
 ## Estado y limitaciones honestas
 
-- Clasificador + features + CLI · bridge WebSocket · dashboard · playbooks de los 4 stacks (Zigbee/BLE/LoRa/Thread) con crypto verificada por round-trip (`selftest` 8/8).
-- Los playbooks están **verificados criptográficamente pero no contra hardware aún**: el CC1352P7 del CatSniffer es RX-only con el firmware sniffer — la inyección (TX) requiere un segundo dongle con firmware de inyección o un CC2531.
-- La captura de llaves Zigbee asume la TC link key por defecto (el caso común en dispositivos consumer).
-- BLE: el crackeo aplica solo a **LE Legacy Pairing** (passkey/Just Works). LE Secure Connections (ECDH) no es vulnerable a fuerza bruta offline — el tool lo detecta y lo dice. Requiere capturar el emparejamiento completo desde el CONNECT_IND.
-- LoRaWAN: el auditor detecta debilidades de sesión (FCnt/DevNonce); no descifra payloads sin las claves OTAA.
+- ✅ Clasificador + features + CLI · bridge WebSocket · dashboard · playbooks de los 4 stacks (Zigbee/BLE/LoRa/Thread) con crypto verificada por round-trip (`selftest` 8/8).
+- ⚠️ Los playbooks están **verificados criptográficamente pero no contra hardware aún**: el CC1352P7 del CatSniffer es RX-only con el firmware sniffer — la inyección (TX) requiere un segundo dongle con firmware de inyección o un CC2531.
+- ⚠️ La captura de llaves Zigbee asume la TC link key por defecto (el caso común en dispositivos consumer).
+- ⚠️ BLE: el crackeo aplica solo a **LE Legacy Pairing** (passkey/Just Works). LE Secure Connections (ECDH) no es vulnerable a fuerza bruta offline — el tool lo detecta y lo dice. Requiere capturar el emparejamiento completo desde el CONNECT_IND.
+- ⚠️ LoRaWAN: el auditor detecta debilidades de sesión (FCnt/DevNonce); no descifra payloads sin las claves OTAA.
 
 ## Estructura
 
@@ -114,4 +138,4 @@ skyrf/
 
 ## Roadmap
 
-Ver `PROYECTO.md` — preguntas de investigación (RQ1–RQ3), plan de dataset propio y fases.
+Ver `PROYECTO.md` — preguntas de investigación (RQ1–RQ3), plan de dataset propio, fases y saga de videos.
