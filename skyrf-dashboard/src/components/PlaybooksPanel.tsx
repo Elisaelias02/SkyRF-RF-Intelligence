@@ -9,40 +9,26 @@ import { Cat, Play, Radar, ShieldCheck, SquareTerminal, Trash2, Zap } from 'luci
  */
 
 interface PlaybookCard {
-  id: 'ble_legacy' | 'selftest' | null;   // null = watcher automático
+  id: 'ble_legacy' | 'ble_audit' | 'selftest';
   name: string;
   desc: string;
-  auto?: string;                          // nota para watchers en línea
 }
 
 const CARDS: PlaybookCard[] = [
   {
+    id: 'ble_audit',
+    name: 'BLE AUDIT REPORT',
+    desc: 'Auditoría de privacidad sobre la captura: identifica dispositivos, nivel de exposición y genera el reporte en Markdown.',
+  },
+  {
     id: 'ble_legacy',
     name: 'BLE LEGACY CRACK',
-    desc: 'Fuerza bruta del TK de LE Legacy Pairing sobre la captura viva y descifrado AES-CCM de la conexión.',
+    desc: 'Intenta el ataque de LE Legacy Pairing sobre el pcap: fuerza bruta del TK y descifrado AES-CCM. Detecta y reporta Secure Connections.',
   },
   {
     id: 'selftest',
     name: 'SELFTEST 8/8',
-    desc: 'Verifica la cripto (c1/s1, crack round-trip) y los 4 watchers contra vectores oficiales.',
-  },
-  {
-    id: null,
-    name: 'TRANSPORT KEY WATCHER',
-    desc: 'Extrae la network key Zigbee al unirse un dispositivo.',
-    auto: 'AUTO · --proto zigbee',
-  },
-  {
-    id: null,
-    name: 'THREAD WATCHER',
-    desc: 'MLE sensible en claro y ventanas de comisionado abiertas.',
-    auto: 'AUTO · --proto zigbee',
-  },
-  {
-    id: null,
-    name: 'LORAWAN AUDITOR',
-    desc: 'FCnt reset (replay), DevNonce reutilizado y floods de join.',
-    auto: 'AUTO · --proto lora',
+    desc: 'Verifica la cripto (c1/s1, crack round-trip) y los watchers contra vectores oficiales.',
   },
 ];
 
@@ -62,7 +48,7 @@ export function PlaybooksPanel({ snap }: { snap: Snapshot }) {
       <div className="panel-header">
         <span className="label-caps flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-[#00e5ff]" />
-          Playbooks de ataque
+          Playbooks de análisis
         </span>
         <span className="text-[10px] text-muted-foreground tracking-wider">
           {live
@@ -71,7 +57,7 @@ export function PlaybooksPanel({ snap }: { snap: Snapshot }) {
         </span>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-2 p-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 p-3">
         {CARDS.map(c => (
           <div
             key={c.name}
@@ -81,30 +67,22 @@ export function PlaybooksPanel({ snap }: { snap: Snapshot }) {
               <span className="text-[11px] font-semibold tracking-[0.12em] text-foreground">
                 {c.name}
               </span>
-              {c.auto ? (
-                <span className="text-[9px] px-1.5 py-0.5 rounded border border-[#34d399]/40 text-[#34d399] tracking-[0.12em] whitespace-nowrap">
-                  {c.auto}
-                </span>
-              ) : (
-                <Cat className="w-3.5 h-3.5 text-[#00e5ff]/70" />
-              )}
+              <Cat className="w-3.5 h-3.5 text-[#00e5ff]/70" />
             </div>
             <p className="text-[10px] leading-relaxed text-muted-foreground flex-1">
               {c.desc}
             </p>
-            {c.id && (
-              <button
-                type="button"
-                disabled={!live || running !== null}
-                onClick={() => engine.runPlaybook(c.id as 'ble_legacy' | 'selftest')}
-                className="inline-flex items-center justify-center gap-1.5 rounded border border-[#00e5ff]/50
-                  bg-[#00e5ff]/10 px-2 py-1.5 text-[10px] font-semibold tracking-[0.15em] text-[#00e5ff]
-                  transition-colors hover:bg-[#00e5ff]/20 disabled:opacity-35 disabled:cursor-not-allowed"
-              >
-                <Play className="w-3 h-3" />
-                {running === c.id ? 'EJECUTANDO…' : 'EJECUTAR'}
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={!live || running !== null}
+              onClick={() => engine.runPlaybook(c.id, snap.attack.captureOut ?? undefined)}
+              className="inline-flex items-center justify-center gap-1.5 rounded border border-[#00e5ff]/50
+                bg-[#00e5ff]/10 px-2 py-1.5 text-[10px] font-semibold tracking-[0.15em] text-[#00e5ff]
+                transition-colors hover:bg-[#00e5ff]/20 disabled:opacity-35 disabled:cursor-not-allowed"
+            >
+              <Play className="w-3 h-3" />
+              {running === c.id ? 'EJECUTANDO…' : 'EJECUTAR'}
+            </button>
           </div>
         ))}
       </div>

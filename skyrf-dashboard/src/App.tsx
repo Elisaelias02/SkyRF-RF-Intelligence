@@ -10,7 +10,6 @@ import { DeviceDrawer } from '@/components/DeviceDrawer';
 import { BridgeDialog } from '@/components/BridgeDialog';
 import { SuccessKitty } from '@/components/SuccessKitty';
 import { PlaybooksPanel } from '@/components/PlaybooksPanel';
-import { AttackPanel } from '@/components/AttackPanel';
 
 export default function App() {
   const [snap, setSnap] = useState<Snapshot>(() => engine.getSnapshot());
@@ -56,8 +55,6 @@ export default function App() {
             <AlertsFeed alerts={snap.alerts} />
           </div>
         </div>
-
-        <AttackPanel snap={snap} />
 
         <PlaybooksPanel snap={snap} />
 

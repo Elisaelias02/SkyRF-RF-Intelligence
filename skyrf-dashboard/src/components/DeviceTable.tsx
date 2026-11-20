@@ -25,6 +25,18 @@ function fmtAgo(t: number, now: number) {
   return d < 1 ? 'ahora' : `${Math.floor(d)}s`;
 }
 
+// Log-distance calibrado a -59 dBm @1 m (convención iBeacon, n=2.5)
+function estDistance(rssi: number): string {
+  const d = Math.min(60, Math.max(0.3, Math.pow(10, (-59 - rssi) / 25)));
+  return d < 10 ? `≈${d.toFixed(1)} m` : `≈${Math.round(d)} m`;
+}
+
+const EXP_STYLE: Record<string, string> = {
+  alto: 'text-[#f87171] border-[#f87171]/40 bg-[#f87171]/10',
+  medio: 'text-[#fbbf24] border-[#fbbf24]/40 bg-[#fbbf24]/10',
+  bajo: 'text-[#34d399] border-[#34d399]/40 bg-[#34d399]/10',
+};
+
 interface Props {
   devices: Device[];
   elapsed: number;
@@ -48,14 +60,13 @@ export function DeviceTable({ devices, elapsed, filter, onSelect }: Props) {
         <table className="w-full text-[12px]">
           <thead>
             <tr className="text-left border-b border-border">
-              {['', 'Dirección', 'Nodo', 'Protocolo', 'Conf.', 'RSSI', 'Canal', 'Pkts/s', 'Visto'].map(h => (
+              {['', 'Dirección', 'Identidad', 'Protocolo', 'Exposición', 'RSSI', 'Canal', 'Pkts/s', 'Visto'].map(h => (
                 <th key={h} className="label-caps font-medium px-3 py-2 whitespace-nowrap">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {rows.map(d => {
-              const conf = d.cls ? Math.round(d.cls.confidence * 100) : null;
               const proto = d.proto ?? d.cls?.label;
               const pps = d.ppsHistory[d.ppsHistory.length - 1] ?? 0;
               return (
@@ -70,8 +81,21 @@ export function DeviceTable({ devices, elapsed, filter, onSelect }: Props) {
                   <td className="px-3 py-2">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#34d399]" />
                   </td>
-                  <td className="px-3 py-2 font-medium tabular-nums whitespace-nowrap">{d.id}</td>
-                  <td className="px-3 py-2 whitespace-nowrap text-muted-foreground">Nodo RF</td>
+                  <td className="px-3 py-2 font-medium tabular-nums whitespace-nowrap">
+                    {d.id}
+                    {d.addrType && (
+                      <span className="block text-[9px] tracking-wider uppercase text-muted-foreground">
+                        MAC {d.addrType}{d.addrType === 'pública' ? ' · trackeable' : ''}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {d.dev ? (
+                      <span className="text-[#00e5ff] font-medium">{d.dev}</span>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2">
                     {proto ? (
                       <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold tracking-[0.12em] uppercase ${PROTO_STYLE[proto]}`}>
@@ -83,11 +107,21 @@ export function DeviceTable({ devices, elapsed, filter, onSelect }: Props) {
                       </span>
                     )}
                   </td>
-                  <td className={`px-3 py-2 tabular-nums ${conf !== null && conf < 70 ? 'text-[#fbbf24]' : 'text-foreground'}`}>
-                    {conf !== null ? `${conf}%` : '—'}
+                  <td className="px-3 py-2">
+                    {d.exposure ? (
+                      <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold tracking-[0.12em] uppercase ${EXP_STYLE[d.exposure] ?? ''}`}
+                        title={d.expWhy?.join(' · ')}>
+                        {d.exposure}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground/60 text-[10px]">—</span>
+                    )}
                   </td>
                   <td className="px-3 py-2 tabular-nums text-muted-foreground whitespace-nowrap">
                     {d.rssi !== null ? `${Math.round(d.rssi)} dBm` : '—'}
+                    {d.rssi !== null && (
+                      <span className="block text-[9px] text-[#00e5ff]/70">{estDistance(d.rssi)}</span>
+                    )}
                   </td>
                   <td className="px-3 py-2 tabular-nums">{d.channel || '—'}</td>
                   <td className="px-3 py-2">

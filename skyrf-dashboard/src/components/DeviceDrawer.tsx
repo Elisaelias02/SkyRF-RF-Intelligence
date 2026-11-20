@@ -6,6 +6,12 @@ const PROTO_COLOR: Record<Protocol, string> = {
   zigbee: '#00e5ff', ble: '#7dd3fc', thread: '#e879f9', lora: '#34d399',
 };
 
+// Log-distance calibrado a -59 dBm @1 m (convención iBeacon, n=2.5)
+function estDistance(rssi: number): string {
+  const d = Math.min(60, Math.max(0.3, Math.pow(10, (-59 - rssi) / 25)));
+  return d < 10 ? `≈${d.toFixed(1)} m` : `≈${Math.round(d)} m`;
+}
+
 interface Props {
   device: Device | null;
   onClose: () => void;
@@ -51,8 +57,12 @@ export function DeviceDrawer({ device, onClose }: Props) {
       <aside className="absolute right-0 top-0 bottom-0 w-full max-w-sm bg-card border-l border-border flex flex-col">
         <div className="panel-header h-12">
           <div className="min-w-0">
-            <div className="text-[13px] font-semibold truncate">Nodo {device.id}</div>
-            <div className="text-[10px] text-muted-foreground">canal {device.channel} · RF</div>
+            <div className="text-[13px] font-semibold truncate">
+              {device.dev ? <span className="text-[#00e5ff]">{device.dev}</span> : `Nodo ${device.id}`}
+            </div>
+            <div className="text-[10px] text-muted-foreground">
+              {device.dev ? `${device.id} · ` : ''}canal {device.channel}{device.addrType ? ` · MAC ${device.addrType}` : ''} · RF
+            </div>
           </div>
           <button
             onClick={onClose}
@@ -66,6 +76,44 @@ export function DeviceDrawer({ device, onClose }: Props) {
         </div>
 
         <div className="flex-1 overflow-auto p-4 space-y-5">
+          {device.proto === 'ble' && (
+            <section>
+              <h3 className="label-caps mb-2">Auditoría de exposición</h3>
+              <div className="rounded-md border border-border/60 bg-secondary/30 p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-semibold tracking-[0.12em] uppercase ${
+                    device.exposure === 'alto' ? 'text-[#f87171] border-[#f87171]/40 bg-[#f87171]/10'
+                    : device.exposure === 'medio' ? 'text-[#fbbf24] border-[#fbbf24]/40 bg-[#fbbf24]/10'
+                    : 'text-[#34d399] border-[#34d399]/40 bg-[#34d399]/10'
+                  }`}>
+                    {device.exposure ?? 'bajo'}
+                  </span>
+                  {device.addrType && (
+                    <span className="text-[10px] text-muted-foreground">
+                      MAC {device.addrType}{device.addrType === 'pública' ? ' · trackeable' : ' · rota periódicamente'}
+                    </span>
+                  )}
+                  {device.rssi !== null && (
+                    <span className="text-[10px] text-[#00e5ff]/80 ml-auto tabular-nums">
+                      {estDistance(device.rssi)} · {Math.round(device.rssi)} dBm
+                    </span>
+                  )}
+                </div>
+                {device.expWhy && device.expWhy.length > 0 ? (
+                  <ul className="space-y-1">
+                    {device.expWhy.map((w, i) => (
+                      <li key={i} className="text-[11px] text-foreground/85 leading-snug">· {w}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-[10px] text-muted-foreground leading-snug">
+                    Sin datos identificativos en sus anuncios — buena higiene de privacidad.
+                  </p>
+                )}
+              </div>
+            </section>
+          )}
+
           <section>
             <h3 className="label-caps mb-2">Clasificación por protocolo</h3>
             <div className="space-y-1.5">

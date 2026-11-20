@@ -21,6 +21,10 @@ export interface Device {
   lastSeen: number;
   proto?: Protocol;         // verdad del bridge (él sabe qué está sniffando)
   cls?: Classification;
+  dev?: string | null;      // identidad BLE: nombre / Apple Continuity / servicio
+  addrType?: string | null; // 'pública' | 'aleatoria' (BLE)
+  exposure?: string | null; // 'alto' | 'medio' | 'bajo' (score del bridge)
+  expWhy?: string[] | null; // razones del nivel de exposición
 }
 
 export interface Alert {
@@ -231,10 +235,15 @@ export class Engine {
       };
       this.devices.set(src, d);
       if (src !== 'desconocido') {
-        this.pushAlert('info', 'DISPOSITIVO NUEVO', `${src} · canal ${channel}`);
+        const tag = typeof msg.dev === 'string' && msg.dev ? ` · ${msg.dev}` : '';
+        this.pushAlert('info', 'DISPOSITIVO NUEVO', `${src}${tag} · canal ${channel}`);
       }
     }
     if (proto) d.proto = proto;
+    if (typeof msg.dev === 'string' && msg.dev) d.dev = msg.dev;
+    if (typeof msg.addrType === 'string' && msg.addrType) d.addrType = msg.addrType;
+    if (typeof msg.exposure === 'string' && msg.exposure) d.exposure = msg.exposure;
+    if (Array.isArray(msg.expWhy) && msg.expWhy.length) d.expWhy = msg.expWhy;
     d.channel = channel;
     d.lastSeen = now;
     d.rssi = typeof msg.rssi === 'number' ? msg.rssi : null;
@@ -318,7 +327,7 @@ export class Engine {
     if (this.playbook.log.length > 400) this.playbook.log.shift();
   }
 
-  runPlaybook(name: 'ble_legacy' | 'selftest', pcap?: string) {
+  runPlaybook(name: 'ble_legacy' | 'ble_audit' | 'selftest', pcap?: string) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.pushPlaybookLine('[✗] Bridge offline — no puedo lanzar el playbook');
       return;
