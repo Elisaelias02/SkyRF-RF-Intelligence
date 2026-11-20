@@ -1,8 +1,7 @@
-# SkyRF 🐱
+# SkyRF 
 
-**RF intelligence framework** para seguridad IoT — clasificación automática de señales, playbooks de ataque automatizados y dashboard en vivo sobre **CatSniffer V3**. Proyecto de investigación **by Cinn4mor0ll**. Nombrado por Sky 🐾, la gata que olfatea el espectro.
+**RF intelligence framework** para seguridad IoT — clasificación automática de señales, playbooks de ataque automatizados y dashboard en vivo sobre **CatSniffer V3**. Proyecto de investigación **by Cinn4mor0ll**. Nombrado por Sky, mi gatita.
 
-> Todo el desarrollo y las capturas son sobre dispositivos propios en laboratorio controlado. Uso exclusivo para investigación y auditoría autorizada — mismo marco que KillerBee/Sniffle/Kismet.
 
 ## Componentes
 
@@ -150,11 +149,11 @@ Accuracy actual sobre datos sintéticos: validación del pipeline, **no** del mo
 
 ## Estado y limitaciones honestas
 
-- ✅ Clasificador + features + CLI · bridge WebSocket · dashboard · playbooks de los 4 stacks (Zigbee/BLE/LoRa/Thread) con crypto verificada por round-trip (`selftest` 8/8).
-- ⚠️ Los playbooks están **verificados criptográficamente pero no contra hardware aún**: el CC1352P7 del CatSniffer es RX-only con el firmware sniffer — la inyección (TX) requiere un segundo dongle con firmware de inyección o un CC2531.
-- ⚠️ La captura de llaves Zigbee asume la TC link key por defecto (el caso común en dispositivos consumer).
-- ⚠️ BLE: el crackeo aplica solo a **LE Legacy Pairing** (passkey/Just Works). LE Secure Connections (ECDH) no es vulnerable a fuerza bruta offline — el tool lo detecta y lo dice. Requiere capturar el emparejamiento completo desde el CONNECT_IND.
-- ⚠️ LoRaWAN: el auditor detecta debilidades de sesión (FCnt/DevNonce); no descifra payloads sin las claves OTAA.
+- Clasificador + features + CLI · bridge WebSocket · dashboard · playbooks de los 4 stacks (Zigbee/BLE/LoRa/Thread) con crypto verificada por round-trip (`selftest` 8/8).
+- Los playbooks están **verificados criptográficamente pero no contra hardware aún**: el CC1352P7 del CatSniffer es RX-only con el firmware sniffer — la inyección (TX) requiere un segundo dongle con firmware de inyección o un CC2531.
+- La captura de llaves Zigbee asume la TC link key por defecto (el caso común en dispositivos consumer).
+- BLE: el crackeo aplica solo a **LE Legacy Pairing** (passkey/Just Works). LE Secure Connections (ECDH) no es vulnerable a fuerza bruta offline — el tool lo detecta y lo dice. Requiere capturar el emparejamiento completo desde el CONNECT_IND.
+- LoRaWAN: el auditor detecta debilidades de sesión (FCnt/DevNonce); no descifra payloads sin las claves OTAA.
 
 ## Estructura
 
