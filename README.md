@@ -2,7 +2,6 @@
 
 **RF intelligence framework** para seguridad IoT — clasificación automática de señales, playbooks de ataque automatizados y dashboard en vivo sobre **CatSniffer V3**. Proyecto de investigación **by Cinn4mor0ll**. Nombrado por Sky 🐾, la gata que olfatea el espectro.
 
-> Todo el desarrollo y las capturas son sobre dispositivos propios en laboratorio controlado. Uso exclusivo para investigación y auditoría autorizada — mismo marco que KillerBee/Sniffle/Kismet.
 
 ## Componentes
 
