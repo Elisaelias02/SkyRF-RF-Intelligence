@@ -37,6 +37,7 @@ import json
 import os
 import re
 import struct
+import subprocess
 import sys
 import time
 
@@ -208,20 +209,26 @@ CAPTURE_PROC: asyncio.subprocess.Process | None = None
 CAPTURE_OUT: str | None = None
 VICTIM_ACTIVE = False
 VICTIM_ADDR: str | None = None
+VICTIM_PROC: asyncio.subprocess.Process | None = None
 
 # Scripts fijos (sin parámetros del usuario -> nada que inyectar).
-# ON:  apaga el adaptador, desactiva Secure Connections (fuerza Legacy
-#      Pairing), lo enciende y lo deja emparejable/descubierto con un agente
-#      capaz de mostrar passkey.
-# OFF: deshace todo y devuelve el adaptador a Secure Connections.
+# ON:  apaga el adaptador y desactiva Secure Connections (fuerza Legacy
+#      Pairing). Después se lanza un bluetoothctl PERSISTENTE (ver
+#      victim_mode): el agente de pairing vive mientras viva ese proceso —
+#      si hiciera quit inmediato, cuando el teléfono intentara emparejarse
+#      no habría agente y el pairing fallaría o caería en Just Works.
+#      El agente es DisplayYesNo: la Kali MUESTRA el PIN y el teléfono pide
+#      teclearlo (Passkey Entry) — y el PIN sale en vivo por la consola.
+# OFF: cierra ese bluetoothctl y devuelve el adaptador a Secure Connections.
 VICTIM_ON_SCRIPT = (
     "sudo -n btmgmt power off && sudo -n btmgmt sc off && sudo -n btmgmt power on"
-    " && printf 'power on\\npairable on\\ndiscoverable on\\n"
-    "agent KeyboardOnly\\nadvertise on\\nquit\\n' | bluetoothctl"
 )
 VICTIM_OFF_SCRIPT = (
-    "printf 'advertise off\\nquit\\n' | bluetoothctl;"
-    " sudo -n btmgmt power off && sudo -n btmgmt sc on && sudo -n btmgmt power on"
+    "sudo -n btmgmt power off && sudo -n btmgmt sc on && sudo -n btmgmt power on"
+)
+VICTIM_BTCTL_CMDS = (
+    "power on\npairable on\ndiscoverable on\n"
+    "agent DisplayYesNo\ndefault-agent\nadvertise on\n"
 )
 
 
@@ -258,9 +265,23 @@ async def _broadcast_status() -> None:
     await _send_all(data)
 
 
+async def _victim_stream(proc) -> None:
+    """Reenvía la salida del bluetoothctl persistente a TODOS los clientes.
+
+    Ahí aparecen en vivo los eventos del agente de pairing — incluido el
+    PIN que hay que teclear en el teléfono ("[agent] PIN code: XXXXXX").
+    """
+    assert proc.stdout is not None
+    async for chunk in proc.stdout:
+        for line in chunk.decode(errors="replace").splitlines():
+            print(f"  │[victim] {line}")
+            broadcast({"type": "attack_out", "id": None,
+                       "tag": "victim", "line": line})
+
+
 async def victim_mode(ws, req_id, start: bool) -> None:
     """Activa/desactiva la Kali como víctima BLE emparejable en modo Legacy."""
-    global VICTIM_ACTIVE, VICTIM_ADDR
+    global VICTIM_ACTIVE, VICTIM_ADDR, VICTIM_PROC
     tag = "victim"
     await ws.send(json.dumps({
         "type": "attack_out", "id": req_id, "tag": tag,
@@ -268,6 +289,18 @@ async def victim_mode(ws, req_id, start: bool) -> None:
                  "Kali emparejable y visible…" if start else
                  "[»] Desactivando modo víctima: restaurando Secure Connections…"),
     }))
+
+    if not start and VICTIM_PROC is not None:
+        # Apaga la publicidad y cierra el agente persistente con elegancia.
+        try:
+            assert VICTIM_PROC.stdin is not None
+            VICTIM_PROC.stdin.write(b"advertise off\nquit\n")
+            await VICTIM_PROC.stdin.drain()
+            await asyncio.wait_for(VICTIM_PROC.wait(), timeout=4)
+        except Exception:
+            VICTIM_PROC.kill()
+        VICTIM_PROC = None
+
     try:
         rc = await _run_script(
             ws, req_id, VICTIM_ON_SCRIPT if start else VICTIM_OFF_SCRIPT, tag)
@@ -284,6 +317,26 @@ async def victim_mode(ws, req_id, start: bool) -> None:
 
     ok = rc == 0
     if ok and start:
+        # Agente de pairing PERSISTENTE: si bluetoothctl muere, no hay
+        # agente cuando llegue el pairing y este falla o cae en Just Works.
+        try:
+            VICTIM_PROC = await asyncio.create_subprocess_exec(
+                "bluetoothctl",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            assert VICTIM_PROC.stdin is not None
+            VICTIM_PROC.stdin.write(VICTIM_BTCTL_CMDS.encode())
+            await VICTIM_PROC.stdin.drain()
+            asyncio.ensure_future(_victim_stream(VICTIM_PROC))
+        except FileNotFoundError:
+            ok = False
+            await ws.send(json.dumps({
+                "type": "attack_out", "id": req_id, "tag": tag,
+                "line": "[✗] bluetoothctl no está instalado.",
+            }))
+        await asyncio.sleep(1.5)  # deja que BlueZ aplique y el agente registre
+
         addr = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -297,15 +350,18 @@ async def victim_mode(ws, req_id, start: bool) -> None:
                 addr = cand.upper()
         except Exception:
             pass
-        VICTIM_ACTIVE = True
-        VICTIM_ADDR = addr
-        await ws.send(json.dumps({
-            "type": "attack_out", "id": req_id, "tag": tag,
-            "line": (f"[★] Kali en modo víctima — BD_ADDR {addr}. Empareja el "
-                     "teléfono contra esta dirección." if addr else
-                     "[★] Kali en modo víctima (no pude leer el BD_ADDR, "
-                     "míralo con `hcitool dev`)."),
-        }))
+        if ok:
+            VICTIM_ACTIVE = True
+            VICTIM_ADDR = addr
+            await ws.send(json.dumps({
+                "type": "attack_out", "id": req_id, "tag": tag,
+                "line": (f"[★] Kali en modo víctima — BD_ADDR {addr}. En el "
+                         "teléfono: olvida cualquier pairing previo con esta "
+                         "máquina y emparéjala de nuevo. Cuando pida el PIN, "
+                         "aparecerá AQUÍ en la consola." if addr else
+                         "[★] Kali en modo víctima (no pude leer el BD_ADDR, "
+                         "míralo con `hcitool dev`)."),
+            }))
     elif ok:
         VICTIM_ACTIVE = False
         VICTIM_ADDR = None
@@ -317,7 +373,8 @@ async def victim_mode(ws, req_id, start: bool) -> None:
         await ws.send(json.dumps({
             "type": "attack_out", "id": req_id, "tag": tag,
             "line": ("[✗] Falló (¿regla sudoers NOPASSWD para btmgmt/"
-                     "bluetoothctl/hcitool instalada? ver README §4)."),
+                     "bluetoothctl/hcitool instalada? ¿adaptador hci0 "
+                     "presente? ver README §4)."),
         }))
     await ws.send(json.dumps({
         "type": "attack_done", "id": req_id, "action": "victim_mode",
@@ -718,6 +775,18 @@ def main() -> int:
         asyncio.run(serve())
     except KeyboardInterrupt:
         pass
+    finally:
+        # Higiene: no dejar la Kali expuesta (pairable + SC apagado) si el
+        # bridge muere con el modo víctima activo.
+        if VICTIM_ACTIVE or VICTIM_PROC is not None:
+            print("\n  » restaurando adaptador Bluetooth (Secure Connections ON)…")
+            try:
+                if VICTIM_PROC is not None:
+                    VICTIM_PROC.kill()
+            except Exception:
+                pass
+            subprocess.run(["bash", "-c", VICTIM_OFF_SCRIPT],
+                           capture_output=True)
     return 0
 
 

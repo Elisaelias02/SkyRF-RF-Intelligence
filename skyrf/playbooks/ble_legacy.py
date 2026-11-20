@@ -631,7 +631,14 @@ def main(argv=None) -> int:
                                  ("Confirm", p.confirm_i), ("Random", p.rand_i),
                                  ("CONNECT_IND (direcciones)", p.ia)) if not v]
         print(f"\n[✗] Captura incompleta para el ataque — faltan: {', '.join(faltan)}")
-        print("    Graba el emparejamiento COMPLETO: tshark -i sniffle -w ble.pcapng")
+        if not p.ia:
+            print("    ⚠ No hay NINGÚN CONNECT_IND: esta captura es SOLO advertising.")
+            print("    → El pairing ocurre DENTRO de la conexión: captura CON el filtro MAC")
+            print("      de la víctima (Sniffle sigue la conexión por los canales de datos)")
+            print("      y empareja DESPUÉS de iniciar la captura, nunca antes.")
+            print("      En el dashboard: paso 02 con la MAC de la víctima escrita.")
+        print("    Manual: tshark -i sniffle -o \"extcap.sniffle.serport:/dev/ttyACM0\" \\")
+        print("            -o \"extcap.sniffle.mac:AA:BB:CC:DD:EE:FF\" -w ble.pcapng")
         return 2
     if cap.secure_connections:
         print("\n[✗] La captura usa LE Secure Connections (ECDH) — no vulnerable a"
