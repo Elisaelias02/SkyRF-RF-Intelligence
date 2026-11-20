@@ -107,12 +107,13 @@ async def handler(ws) -> None:
 
 PLAYBOOKS = {
     "ble_legacy": "skyrf.playbooks.ble_legacy",
+    "ble_audit": "skyrf.playbooks.ble_audit",
     "selftest": "skyrf.playbooks.selftest",
 }
 
 
 async def handle_command(ws, raw: str) -> None:
-    global PLAYBOOK_RUNNING
+    global PLAYBOOK_RUNNING, CAPTURE_PROC
     try:
         msg = json.loads(raw)
     except ValueError:
@@ -147,7 +148,25 @@ async def handle_command(ws, raw: str) -> None:
         return
 
     argv = [sys.executable, "-m", PLAYBOOKS[name]]
-    if name == "ble_legacy":
+    if name in ("ble_legacy", "ble_audit"):
+        # Si la captura sigue viva, el pcap está a medias (o recién
+        # truncado si se reinició): el crack leería 0 paquetes. Se
+        # detiene sola antes de crackear.
+        if CAPTURE_PROC is not None and CAPTURE_PROC.returncode is None:
+            await ws.send(json.dumps({
+                "type": "playbook_out", "id": req_id,
+                "line": "[i] Deteniendo la captura primero: el pcap solo "
+                        "es completo con tshark cerrado…",
+            }))
+            CAPTURE_PROC.terminate()
+            try:
+                await asyncio.wait_for(CAPTURE_PROC.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                CAPTURE_PROC.kill()
+                await CAPTURE_PROC.wait()
+            CAPTURE_PROC = None
+            await asyncio.sleep(0.7)  # flush del archivo a disco
+            await _broadcast_status()
         target = msg.get("pcap") or CURRENT_SOURCE
         if (not target or not isinstance(target, str)
                 or not target.endswith((".pcap", ".pcapng"))
@@ -161,7 +180,10 @@ async def handle_command(ws, raw: str) -> None:
                 "ok": False, "code": -1,
             }))
             return
-        out = target.rsplit(".", 1)[0] + "_descifrado.pcapng"
+        if name == "ble_legacy":
+            out = target.rsplit(".", 1)[0] + "_descifrado.pcapng"
+        else:  # ble_audit → reporte Markdown
+            out = target.rsplit(".", 1)[0] + "_auditoria.md"
         argv += [target, "-o", out]
 
     PLAYBOOK_RUNNING = True
@@ -265,6 +287,56 @@ async def _broadcast_status() -> None:
     await _send_all(data)
 
 
+async def _bt_preflight() -> str | None:
+    """Devuelve el BD_ADDR del adaptador si hay un hci0 usable, None si no.
+
+    Antes intenta resucitar la pila (bluetoothd parado / rfkill) con
+    `sudo -n`: si el usuario no tiene esas reglas sudoers fallan en
+    silencio y el diagnóstico posterior lo explica. Sin hci0 no tiene
+    sentido seguir: btmgmt escupiría "Invalid Index" y bluetoothctl se
+    quedaría en "Waiting to connect to bluetoothd...".
+    """
+    recover = ("sudo -n systemctl unmask bluetooth 2>/dev/null; "
+               "sudo -n systemctl start bluetooth 2>/dev/null; "
+               "sudo -n rfkill unblock bluetooth 2>/dev/null; true")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c", recover,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(proc.wait(), timeout=8)
+    except Exception:
+        pass
+    await asyncio.sleep(1.0)  # deja que bluetoothd registre el adaptador
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c", "hcitool dev | awk 'NR>1{print $2; exit}'",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        cand = out.decode(errors="replace").strip()
+        if _MAC_RE.match(cand) and cand != "00:00:00:00:00:00":
+            return cand.upper()
+    except Exception:
+        pass
+    return None
+
+
+_BT_MISSING_HINTS = (
+    "[✗] No hay adaptador Bluetooth usable (hci0): el dongle no llega a BlueZ.",
+    "    Diagnóstico en una terminal de Kali:",
+    "      1) lsusb | grep -iE 'cambridge|csr|realtek|broadcom|bluetooth'",
+    "         → Si NO sale: VMware ▸ VM ▸ Removable Devices ▸ [tu dongle] ▸",
+    "           Connect (Disconnect from Host). Si lo tiene Windows, la VM",
+    "           jamás lo verá. El CatSniffer NO sirve para esto: es sniffer.",
+    "      2) sudo systemctl unmask bluetooth && sudo systemctl start bluetooth",
+    "      3) rfkill list  →  sudo rfkill unblock bluetooth",
+    "      4) hcitool dev  →  debe listar hci0 con una MAC",
+    "      5) sudo dmesg | grep -iE 'bluetooth|hci' | tail",
+    "         (los clones CSR8510 baratos a veces fallan al cargar firmware)",
+)
+
+
 async def _victim_stream(proc) -> None:
     """Reenvía la salida del bluetoothctl persistente a TODOS los clientes.
 
@@ -300,6 +372,24 @@ async def victim_mode(ws, req_id, start: bool) -> None:
         except Exception:
             VICTIM_PROC.kill()
         VICTIM_PROC = None
+
+    if start:
+        # Preflight: sin hci0 todo lo demás es ruido (btmgmt "Invalid Index",
+        # bluetoothctl colgado). Resucita la pila si puede y, si aun así no
+        # hay adaptador, falla rápido con el diagnóstico exacto.
+        addr_pre = await _bt_preflight()
+        if addr_pre is None:
+            for line in _BT_MISSING_HINTS:
+                await ws.send(json.dumps({
+                    "type": "attack_out", "id": req_id, "tag": tag,
+                    "line": line,
+                }))
+            await ws.send(json.dumps({
+                "type": "attack_done", "id": req_id, "action": "victim_mode",
+                "ok": False, "code": -1,
+            }))
+            await _broadcast_status()
+            return
 
     try:
         rc = await _run_script(
@@ -541,6 +631,106 @@ _BLE_PDU_FRAME_TYPE = {
     0x06: "command",  # CONNECT_IND / AUX_CONNECT_REQ
 }
 
+# --- identificación de dispositivos (para la auditoría BLE) ------------------
+# Los ADV PDUs llevan "AD structures" [len][type][data]: nombre, fabricante,
+# servicios… Con eso el panel muestra "JBL GO 2" en vez de solo una MAC.
+
+# Company IDs (Bluetooth SIG, AD type 0xFF) — los más vistos en la vida real
+_BLE_COMPANY = {
+    0x004C: "Apple", 0x0006: "Microsoft", 0x00E0: "Google",
+    0x0075: "Samsung", 0x012D: "Sony", 0x000D: "Texas Instruments",
+    0x0059: "Nordic Semi", 0x000A: "CSR", 0x000F: "Broadcom",
+    0x0002: "Intel", 0x0087: "Garmin",
+}
+
+# Subtipo de Apple Continuity (primer byte tras el company id 0x004C)
+_APPLE_CONTINUITY = {
+    0x02: "iBeacon", 0x05: "AirDrop", 0x07: "AirPods", 0x09: "AirPlay",
+    0x0C: "Handoff", 0x10: "Nearby (iPhone/Mac)", 0x12: "Find My (¿AirTag?)",
+}
+
+# Service UUIDs de 16 bits (AD types 0x02/0x03) con identidad clara
+_BLE_SERVICES = {
+    0xFEED: "Tile (rastreador)", 0xFE2C: "Google Fast Pair",
+    0xFE95: "Xiaomi Mi", 0xFEAA: "Eddystone beacon",
+    0xFD6F: "Exposure Notification", 0x180D: "Sensor cardíaco",
+    0x1812: "HID (teclado/mouse)", 0xFE9F: "Google (Cast/Nest)",
+    0xFEB2: "Microsoft Swift Pair",
+}
+
+
+def _parse_ad_structures(data: bytes) -> dict:
+    """Decodifica AD structures del payload de advertising (tras el AdvA)."""
+    out: dict = {"name": None, "company": None, "company_id": None,
+                 "apple_type": None, "services": [], "txpower": None}
+    i = 0
+    while i + 2 <= len(data):
+        ln = data[i]
+        if ln == 0 or i + 1 + ln > len(data):
+            break
+        ad_type, val = data[i + 1], data[i + 2: i + 1 + ln]
+        if ad_type in (0x08, 0x09) and val:            # nombre corto/completo
+            name = val.decode("utf-8", errors="replace").strip("\x00").strip()
+            if name:
+                out["name"] = name
+        elif ad_type == 0xFF and len(val) >= 2:        # manufacturer specific
+            cid = val[0] | (val[1] << 8)
+            out["company_id"] = cid
+            out["company"] = _BLE_COMPANY.get(cid, f"0x{cid:04X}")
+            if cid == 0x004C and len(val) >= 3:        # Apple Continuity
+                out["apple_type"] = val[2]
+        elif ad_type in (0x02, 0x03):                  # service UUIDs 16-bit
+            out["services"] += [val[j] | (val[j + 1] << 8)
+                                for j in range(0, len(val) - 1, 2)]
+        elif ad_type == 0x0A and val:                  # TX Power Level (dBm)
+            out["txpower"] = int.from_bytes(val[:1], "big", signed=True)
+        i += 1 + ln
+    return out
+
+
+# Servicios que convierten al dispositivo en trackeable/rastreador por diseño
+_TRACKY_SERVICES = {0xFEED, 0xFE2C, 0xFEB2}
+
+
+def _ble_exposure(ad: dict, addr_type: str) -> tuple[str, list[str]]:
+    """Score de exposición del dispositivo (lenguaje de reporte de auditoría).
+
+    alto   = nombre en claro, MAC pública (trackeable fija), Find My/AirTag,
+             rastreador por diseño (Tile…)
+    medio  = combinación parcial de las anteriores
+    bajo   = MAC aleatoria y sin datos identificativos
+    """
+    pts, why = 0, []
+    if ad["name"]:
+        pts += 2
+        why.append(f'nombre en claro: "{ad["name"]}"')
+    if addr_type == "pública":
+        pts += 2
+        why.append("MAC pública (fija y trackeable)")
+    if ad["apple_type"] == 0x12:
+        pts += 3
+        why.append("Find My: posible AirTag/rastreador Apple")
+    for u in ad["services"]:
+        if u in _TRACKY_SERVICES:
+            pts += 1
+            why.append(f"servicio rastreable: {_BLE_SERVICES[u]}")
+            break
+    level = "alto" if pts >= 3 else "medio" if pts >= 2 else "bajo"
+    return level, why
+
+
+def _ble_identity(ad: dict) -> str | None:
+    """Prioridad: nombre > Apple Continuity > servicio conocido > fabricante."""
+    if ad["name"]:
+        return ad["name"]
+    if ad["company_id"] == 0x004C and ad["apple_type"] is not None:
+        return "Apple · " + _APPLE_CONTINUITY.get(
+            ad["apple_type"], f"Continuity 0x{ad['apple_type']:02X}")
+    for u in ad["services"]:
+        if u in _BLE_SERVICES:
+            return _BLE_SERVICES[u]
+    return ad["company"]
+
 
 def parse_ble_adv(frame: bytes) -> dict | None:
     """Parsea un PDU de advertising BLE (canales 37-39).
@@ -569,10 +759,24 @@ def parse_ble_adv(frame: bytes) -> dict | None:
         return None
     adva = payload[:6]                     # AdvA: BD_ADDR little-endian al aire
     src = ":".join(f"{x:02X}" for x in reversed(adva))
+    pdu_type = b[0] & 0x0F
+    # bit 6 del header (TxAdd): 0 = dirección pública (fija, trackeable),
+    # 1 = aleatoria (privacidad) — oro para la narrativa de la auditoría
+    addr_type = "aleatoria" if (b[0] & 0x40) else "pública"
+    # Solo los PDUs de advertising llevan AdvData tras el AdvA
+    # (SCAN_REQ = ScanA+AdvA; CONNECT_IND = InitA+AdvA+LLData: sin AD aquí).
+    ident: dict = {}
+    if pdu_type in (0x00, 0x02, 0x04, 0x06) and len(payload) > 6:
+        ad = _parse_ad_structures(payload[6:])
+        level, why = _ble_exposure(ad, addr_type)
+        ident = {"dev": _ble_identity(ad), "txPower": ad["txpower"],
+                 "exposure": level, "expWhy": why}
     return {
         "len": 2 + pdu_len,
         "src": src,
-        "frameType": _BLE_PDU_FRAME_TYPE.get(b[0] & 0x0F, "data"),
+        "frameType": _BLE_PDU_FRAME_TYPE.get(pdu_type, "data"),
+        "addrType": addr_type,
+        **ident,
     }
 
 
@@ -589,11 +793,17 @@ def parse_lora_frame(payload: bytes) -> dict | None:
 
 def _emit_packet(frame: bytes, channel: int, rssi: int | None, consumers,
                  proto: str = "zigbee") -> None:
+    dev = addr_type = None
+    tx_power = None
+    exposure, exp_why = None, None
     if proto == "ble":
         adv = parse_ble_adv(frame)
         if adv is None:
             return                         # no-ADV (data channels) o basura: fuera
         src, dst, frame_type, plen = adv["src"], "", adv["frameType"], adv["len"]
+        dev, addr_type = adv.get("dev"), adv.get("addrType")
+        tx_power = adv.get("txPower")
+        exposure, exp_why = adv.get("exposure"), adv.get("expWhy")
         # RSSI real: vive en el PHDR del pcap (byte 1, con signo) si no vino ya
         if rssi is None and len(frame) >= 14 and frame[10:14] == BLE_ADV_AA:
             rssi = struct.unpack_from("<b", frame, 1)[0]
@@ -614,6 +824,8 @@ def _emit_packet(frame: bytes, channel: int, rssi: int | None, consumers,
         "type": "packet", "t": time.time(), "len": plen,
         "channel": channel, "rssi": rssi, "src": src, "dst": dst,
         "frameType": frame_type, "proto": proto,
+        "dev": dev, "addrType": addr_type, "txPower": tx_power,
+        "exposure": exposure, "expWhy": exp_why,
     })
     for consume in consumers:              # watchers de seguridad del protocolo
         try:
